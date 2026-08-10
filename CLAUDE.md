@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-python -m unittest discover -s tests                    # full suite (45 tests, no git/network needed)
+python -m unittest discover -s tests                    # full suite (93 tests, no git/network needed)
 cd tests && python -m unittest test_dirdiff.ExtractRisk.test_plain_level   # a single test or class
 python -m unittest discover -s tests -k test_plain_level                   # or by name pattern
 
@@ -33,7 +33,8 @@ These are deployment requirements, not preferences. Violating them breaks the to
 ## Architecture
 
 Read `README.md` first — it documents the pipeline, the config format, the report structure and the
-JSON schema for users. What follows is what the README does not say.
+JSON schema for users. `docs/UIUX-GUIDE.md` covers the report's visual language and the design rules
+for extending it; consult it before adding anything to `build_html`. What follows is what neither says.
 
 **The core trick** (`compare.py`): `git diff` runs *twice* — once on the untouched originals, once on
 rule-normalized copies in a temp directory. A file in the first set but not the second changed only

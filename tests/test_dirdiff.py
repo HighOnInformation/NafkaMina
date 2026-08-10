@@ -596,6 +596,30 @@ class BuildHtml(unittest.TestCase):
         self.assertIn('<th colspan="2">src/v1</th>', html)
         self.assertIn('<th colspan="2">src/v2</th>', html)
 
+    def test_rename_with_no_content_change_explains_itself(self):
+        # git emits no @@ at all for a pure rename, so there are no rows to align.
+        # An empty disclosure would drop the only fact that matters about it.
+        section = (
+            "diff --git a/old.c b/new.c\nsimilarity index 100%\n"
+            "rename from old.c\nrename to new.c\n"
+        )
+        real = {"new.c": ("R", ["old.c", "new.c"])}
+        html = build_html("v1", "v2", comparison(real=real, sections={"new.c": section}), {}, None)
+        self.assertIn("<code>old.c</code>", html)
+        self.assertIn("no content change", html)
+        self.assertNotIn('<div class="scroll"></div>', html)
+
+    def test_comparison_table_declares_its_column_widths(self):
+        # table-layout:fixed takes widths from the first row, whose cells span two
+        # columns each, so the gutter width has to come from a colgroup.
+        self.assertIn("<colgroup>", build_html("v1", "v2", comparison(), {}, None))
+
+    def test_prose_headings_are_rendered(self):
+        # llm.py emits "#### Part 1 of 2" itself when it splits a long diff.
+        html = build_html("v1", "v2", comparison(), {"sensor.c": "#### Part 1 of 2\n\nbody"}, None)
+        self.assertIn("<h4>Part 1 of 2</h4>", html)
+        self.assertNotIn("#### Part", html)
+
     def test_binary_gets_a_note_instead_of_a_diff(self):
         html = build_html("v1", "v2", comparison(binaries={"sensor.c"}), {}, None)
         self.assertIn("Binary file", html)

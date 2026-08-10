@@ -4,6 +4,37 @@ Compares two source directories and separates **substantive change** from **nois
 formatting differences, comments, whitespace, and generated timestamps or build
 numbers. Only what survives the filter is sent to a language model for analysis.
 
+Standard library only — no pip, no virtualenv, nothing to install. Copy the directory
+onto a closed network and run it.
+
+## Quick start
+
+```bash
+# 1. Check the box: Python 3.8+, git 2.30+
+python3 -m dirdiff --help
+
+# 2. Compare, without a model — free, deterministic, and complete apart from the prose
+python3 -m dirdiff v1 v2 -c config.json -o report.md --no-llm
+
+# 3. Add the model, an HTML report for a human, and JSON for a machine
+python3 -m dirdiff v1 v2 -c config.json -o report.md -H report.html -j report.json
+```
+
+Always capture stderr — warnings never appear in the report itself, and some of them
+change how much you should trust it:
+
+```bash
+python3 -m dirdiff v1 v2 -c config.json -o report.md 2> report.warnings
+```
+
+## Documentation
+
+| Document | For |
+|---|---|
+| This file | Reference: every flag, config field, output format and limitation |
+| [`docs/UIUX-GUIDE.md`](docs/UIUX-GUIDE.md) | How to use it and how to read what it produces — the three flows, the visual language element by element, the config mistakes that produce a silently wrong report, and what each warning means for trusting the result |
+| [`CLAUDE.md`](CLAUDE.md) | Architecture, hard constraints and conventions for anyone changing the code |
+
 ## What it does
 
 The pipeline runs in two stages.
@@ -207,8 +238,10 @@ before general ones.
 | `json-sort` | Python: read JSON from stdin, write it back with `sort_keys=True` |
 
 Any other string is run as a shell command as-is. The substring `{name}` is replaced
-with the file's basename. If a command exits non-zero, a warning is printed and the
-pre-normalization text is kept.
+with the file's basename, **already quoted for the shell** — do not add quotes of your
+own. Filenames arrive from someone else's source tree, so an unquoted `{name}` would
+let a file called `x&mkdir OWNED&.c` run a command during the comparison. If a command
+exits non-zero, a warning is printed and the pre-normalization text is kept.
 
 #### Why `ignore_lines` and not `git diff -I`
 
@@ -280,7 +313,9 @@ report that reaches for a CDN renders unstyled. It also means the file can be co
 off the box, or opened straight from a `file://` path, with no server involved.
 
 The page follows the reader's light or dark preference. There is no JavaScript in it;
-the collapsible diffs are `<details>` elements.
+the comparisons sit in `<details>` elements, **expanded by default** in the HTML and
+collapsed in the Markdown — so a large drop reads as one scroll in the browser and as a
+summary in the terminal.
 
 Everything in the HTML comes from the same `Comparison` the Markdown is built from, so
 the two never disagree. The risk badge is the regex-extracted level described below,

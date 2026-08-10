@@ -45,14 +45,14 @@ _MARK_FLOOR = 0.5
 # The palette is defined once per theme as tokens. Every rule below reads tokens
 # only, so the page cannot end up with one theme's text on the other's ground.
 _LIGHT = """--ground:#f4f6f7;--surface:#ffffff;--ink:#16191f;--muted:#616b76;
---line:#dde3e6;--accent:#0f6f6c;--recessed:#8b959e;
+--line:#dde3e6;--accent:#0f6f6c;--recessed:#6b747c;
 --add-bg:#e7f1e9;--add-ink:#1f5c33;--del-bg:#f8e7e7;--del-ink:#8a2b2b;
 --filler:#eef1f2;--mark-add:#a8dcbb;--mark-del:#f0bcbc;--hover:rgba(15,111,108,.10);
 --risk-low:#2f6b3f;--risk-med:#8a5a12;--risk-high:#9b2c2c;
 --risk-low-bg:#e7f1e9;--risk-med-bg:#f7efdb;--risk-high-bg:#f8e5e5;"""
 
 _DARK = """--ground:#0f1316;--surface:#171c20;--ink:#e2e8ea;--muted:#94a1aa;
---line:#28323a;--accent:#5fbfba;--recessed:#6b7880;
+--line:#28323a;--accent:#5fbfba;--recessed:#7d8a93;
 --add-bg:#16301f;--add-ink:#84d29e;--del-bg:#331a1c;--del-ink:#e59795;
 --filler:#12171a;--mark-add:#2c6b45;--mark-del:#6b2c2f;--hover:rgba(95,191,186,.16);
 --risk-low:#84d29e;--risk-med:#e0b45f;--risk-high:#ef918e;
@@ -60,7 +60,7 @@ _DARK = """--ground:#0f1316;--surface:#171c20;--ink:#e2e8ea;--muted:#94a1aa;
 
 _CSS = """
 *{box-sizing:border-box}
-:root{__LIGHT__
+:root{color-scheme:light dark;__LIGHT__
 --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
 --mono:ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,"Liberation Mono",monospace}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){__DARK__}}
@@ -123,7 +123,8 @@ table.sbs th{padding:.45rem .6rem;background:var(--surface);border-bottom:1px so
 font:500 .68rem/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
 table.sbs th:first-child{border-right:1px solid var(--line)}
 table.sbs td{padding:.05rem .6rem;vertical-align:top;background:var(--surface);border:0}
-table.sbs td.n{width:3.4rem;text-align:right;color:var(--recessed);
+table.sbs col.cn{width:3.4rem}
+table.sbs td.n{text-align:right;color:var(--recessed);
 font-variant-numeric:tabular-nums;-webkit-user-select:none;user-select:none}
 table.sbs td.t{white-space:pre-wrap;overflow-wrap:anywhere}
 table.sbs td:nth-child(3){border-left:1px solid var(--line)}
@@ -336,11 +337,28 @@ def _change_block(rel, comparison, analyses, real, dir_a, dir_b):
     if rel in analyses:
         parts.append('<div class="prose">%s</div>' % _html_prose(analyses[rel]))
     section = comparison.sections.get(rel)
-    if section:
+    table = _html_side_by_side(section, dir_a, dir_b) if section else ""
+    if table:
         parts.append("<details open><summary>Side-by-side comparison</summary>")
-        parts.append('<div class="scroll">%s</div>' % _html_side_by_side(section, dir_a, dir_b))
+        parts.append('<div class="scroll">%s</div>' % table)
         parts.append("</details>")
+    elif section:
+        # git emits no @@ for a pure rename, so there is nothing to align. An
+        # empty disclosure would drop the only fact the reviewer needs.
+        parts.append('<p class="empty">%s</p>' % _metadata_only_note(rel, real))
     return "\n".join(parts) + "\n</article>"
+
+
+def _metadata_only_note(rel, real):
+    """Explain a change that produced no comparable lines."""
+    status, paths = real[rel]
+    if status in ("R", "C") and len(paths) > 1:
+        verb = "Renamed" if status == "R" else "Copied"
+        return "%s from <code>%s</code> — no content change after normalization." % (
+            verb,
+            escape(paths[0]),
+        )
+    return "No line changes after normalization — the difference is in file metadata only."
 
 
 def _side_by_side(section):
@@ -423,6 +441,9 @@ def _html_side_by_side(section, dir_a, dir_b):
     if not rows:
         return ""
     out = ['<table class="sbs">']
+    # table-layout:fixed takes its widths from the first row, and those cells each
+    # span two columns, so the gutter width has to be declared here instead.
+    out.append('<colgroup><col class="cn"><col><col class="cn"><col></colgroup>')
     out.append(
         '<thead><tr><th colspan="2">%s</th><th colspan="2">%s</th></tr></thead><tbody>'
         % (escape(dir_a), escape(dir_b))
@@ -462,8 +483,14 @@ def _html_prose(text):
         if items:
             blocks.append("<ul>%s</ul>" % "".join(items))
             items = []
-        if stripped:
-            blocks.append("<p>%s</p>" % _inline(stripped))
+        if not stripped:
+            continue
+        # llm.py writes "#### Part 1 of 2" itself when it splits a long diff.
+        heading = re.match(r"#{1,6}\s+(.*)$", stripped)
+        if heading:
+            blocks.append("<h4>%s</h4>" % _inline(heading.group(1)))
+            continue
+        blocks.append("<p>%s</p>" % _inline(stripped))
     if items:
         blocks.append("<ul>%s</ul>" % "".join(items))
     return "\n".join(blocks)
