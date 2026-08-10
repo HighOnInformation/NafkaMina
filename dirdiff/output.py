@@ -47,14 +47,14 @@ _MARK_FLOOR = 0.5
 _LIGHT = """--ground:#f4f6f7;--surface:#ffffff;--ink:#16191f;--muted:#616b76;
 --line:#dde3e6;--accent:#0f6f6c;--recessed:#8b959e;
 --add-bg:#e7f1e9;--add-ink:#1f5c33;--del-bg:#f8e7e7;--del-ink:#8a2b2b;
---filler:#eef1f2;--mark-add:#a8dcbb;--mark-del:#f0bcbc;
+--filler:#eef1f2;--mark-add:#a8dcbb;--mark-del:#f0bcbc;--hover:rgba(15,111,108,.10);
 --risk-low:#2f6b3f;--risk-med:#8a5a12;--risk-high:#9b2c2c;
 --risk-low-bg:#e7f1e9;--risk-med-bg:#f7efdb;--risk-high-bg:#f8e5e5;"""
 
 _DARK = """--ground:#0f1316;--surface:#171c20;--ink:#e2e8ea;--muted:#94a1aa;
 --line:#28323a;--accent:#5fbfba;--recessed:#6b7880;
 --add-bg:#16301f;--add-ink:#84d29e;--del-bg:#331a1c;--del-ink:#e59795;
---filler:#12171a;--mark-add:#2c6b45;--mark-del:#6b2c2f;
+--filler:#12171a;--mark-add:#2c6b45;--mark-del:#6b2c2f;--hover:rgba(95,191,186,.16);
 --risk-low:#84d29e;--risk-med:#e0b45f;--risk-high:#ef918e;
 --risk-low-bg:#16301f;--risk-med-bg:#332708;--risk-high-bg:#331a1a;"""
 
@@ -101,7 +101,8 @@ tr[data-status="noise only"] td,tr[data-status="skipped"] td{color:var(--recesse
 font:.68rem/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
 tr[data-status="added"] .chip{color:var(--add-ink);border-color:var(--add-ink)}
 tr[data-status="deleted"] .chip{color:var(--del-ink);border-color:var(--del-ink)}
-tr[data-status="modified"] .chip{color:var(--accent);border-color:var(--accent)}
+tr[data-status="modified"] .chip,tr[data-status="renamed"] .chip,
+tr[data-status="copied"] .chip{color:var(--accent);border-color:var(--accent)}
 .badge{display:inline-block;padding:.32em .6em;font:.68rem/1 var(--mono);
 letter-spacing:.1em;text-transform:uppercase}
 .risk-low{color:var(--risk-low);background:var(--risk-low-bg)}
@@ -137,6 +138,13 @@ padding:.25rem;letter-spacing:.4em}
 mark.w{color:inherit;padding:.05em 0}
 .s-chg td:nth-child(2) mark.w{background:var(--mark-del)}
 .s-chg td:nth-child(4) mark.w{background:var(--mark-add)}
+/* Corresponding lines share a row, so hovering either side lights both. The
+   tint is a background-image, which composites over whatever colour the row
+   already has instead of replacing it. */
+table.sbs tbody tr:not(.s-gap):hover td{
+background-image:linear-gradient(var(--hover),var(--hover));
+box-shadow:inset 0 1px 0 var(--accent),inset 0 -1px 0 var(--accent)}
+table.sbs tbody tr:not(.s-gap):hover td.n{color:var(--ink)}
 .empty{margin:0;color:var(--muted)}
 """
 

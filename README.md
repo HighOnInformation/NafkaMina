@@ -259,6 +259,14 @@ Both panes live in one table, so they cannot drift out of alignment, and the lin
 numbers on each side are independent — after an insertion the left pane keeps its
 own numbering, which is what lets you see how far the two files have diverged.
 
+**Hovering a line highlights its counterpart on the other side.** Corresponding
+lines share a table row, so the pairing is structural and one CSS rule lights both
+panes at once — there is no JavaScript in the report, and nothing to fall out of sync.
+Hovering an inserted or deleted line highlights the blank half opposite it, which is
+how the view says "this line has no counterpart". Being hover-based, it is a
+pointer-only affordance; the colouring and line numbers carry the same information
+without it.
+
 Markdown and JSON keep the unified diff: side-by-side needs real columns, and the
 JSON `diff` field stays the format an automated consumer already parses.
 

@@ -584,6 +584,13 @@ class BuildHtml(unittest.TestCase):
         self.assertIn('class="sbs"', html)
         self.assertIn('class="s-chg"', html)
 
+    def test_hovering_a_row_highlights_both_sides(self):
+        # Corresponding lines share a <tr>, so the pairing is structural and one
+        # CSS rule lights both panes — no script, which the no-JS report needs.
+        html = build_html("v1", "v2", comparison(), {}, None)
+        self.assertIn("tbody tr:not(.s-gap):hover td", html)
+        self.assertIn("--hover:", html)
+
     def test_panes_are_labelled_with_the_directories(self):
         html = build_html("src/v1", "src/v2", comparison(), {}, None)
         self.assertIn('<th colspan="2">src/v1</th>', html)
