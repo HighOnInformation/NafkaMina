@@ -1,0 +1,33 @@
+{
+  "llm": {
+    "base_url": "http://localhost:8000/v1",
+    "api_key": "",
+    "model": "PLACEHOLDER-MODEL-NAME",
+    "temperature": 0.2,
+    "max_tokens": 1200,
+    "max_chars_per_call": 24000,
+    "max_files": 50,
+    "timeout_sec": 180
+  },
+  "rules": [
+    {
+      "match": ["*.o", "*.a", "*.so", "*.exe", "*.log", "*.tmp"],
+      "skip": true
+    },
+    {
+      "match": ["*.c", "*.h", "*.cpp", "*.hpp"],
+      "normalize": ["strip-comments", "clang-format"],
+      "ignore_lines": [
+        "^\\s*/\\*\\s*Generated on .*\\*/\\s*$",
+        "^\\s*//\\s*Generated on ",
+        "^\\s*/\\*\\s*Build number:.*\\*/\\s*$",
+        "^\\s*#define\\s+BUILD_NUMBER\\b",
+        "^\\s*#define\\s+BUILD_TIMESTAMP\\b"
+      ]
+    },
+    {
+      "match": ["*.json"],
+      "normalize": ["json-sort"]
+    }
+  ]
+}

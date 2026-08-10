@@ -1,0 +1,635 @@
+"""Unit tests for dirdiff — no git, no normalizers, no network.
+
+Run from the repository root:
+
+    python3 -m unittest discover -s tests
+
+Most tests exercise the public interface of a module. A few reach for underscore
+names: those are internal seams, private to their module but used by its own tests
+because git's path formatting and the risk-extraction regex have enough edge cases
+that testing them only from the outside would make failures hard to localize.
+"""
+
+import os
+import shutil
+import stat
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from dirdiff.compare import Comparison, _noise
+from dirdiff.gitdiff import _parse_name_status, _relativize, _split_sections, _unquote
+from dirdiff.llm import analyze_changes
+from dirdiff.output import (
+    _extract_risk,
+    _mark_pair,
+    _side_by_side,
+    build_html,
+    build_json,
+    build_report,
+)
+from dirdiff.rules import (
+    IGNORED_TOKEN,
+    _apply_ignore_lines,
+    _command_for,
+    _program_of,
+    _quote_name,
+    prepare_copy,
+    skipped_files,
+)
+
+
+def comparison(real=None, noise=None, skipped=None, sections=None, binaries=None):
+    """Build a Comparison for tests, defaulting to one modified file."""
+    if real is None:
+        real = {"sensor.c": ("M", ["sensor.c"])}
+    if sections is None:
+        sections = {
+            rel: "diff --git a/%s b/%s\n@@ -1 +1 @@\n-x\n+y\n" % (rel, rel) for rel in real
+        }
+    return Comparison(
+        real=real,
+        noise=set() if noise is None else noise,
+        skipped=set() if skipped is None else skipped,
+        sections=sections,
+        binaries=set() if binaries is None else binaries,
+    )
+
+
+class FakeChat:
+    """Stands in for the chat seam: records calls, returns a canned reply."""
+
+    def __init__(self, reply="**Risk** — Low, fine."):
+        self.calls = []
+        self._reply = reply
+
+    def __call__(self, system, user, label):
+        self.calls.append({"system": system, "user": user, "label": label})
+        return self._reply(len(self.calls)) if callable(self._reply) else self._reply
+
+    @property
+    def labels(self):
+        return [call["label"] for call in self.calls]
+
+
+# --- rules -------------------------------------------------------------------
+
+
+class SkippedFiles(unittest.TestCase):
+    def setUp(self):
+        self.rules = [
+            {"match": ["generated_*.c"], "skip": True},
+            {"match": ["*.c", "*.h"], "normalize": ["clang-format"]},
+            {"match": ["*.log"], "skip": True},
+        ]
+
+    def test_first_match_wins(self):
+        # generated_*.c is listed before *.c, so it skips rather than normalizes.
+        self.assertEqual(
+            skipped_files(self.rules, ["src/generated_tables.c", "src/sensor.c"]),
+            {"src/generated_tables.c"},
+        )
+
+    def test_matches_basename_not_only_path(self):
+        self.assertEqual(skipped_files(self.rules, ["deep/nested/build.log"]), {"deep/nested/build.log"})
+
+    def test_unmatched_paths_are_not_skipped(self):
+        self.assertEqual(skipped_files(self.rules, ["notes.txt", "src/sensor.c"]), set())
+
+
+class ApplyIgnoreLines(unittest.TestCase):
+    def test_replaces_and_preserves_line_count(self):
+        text = "keep\n#define BUILD_NUMBER 7\nkeep too"
+        result = _apply_ignore_lines(text, [r"^\s*#define\s+BUILD_NUMBER\b"])
+        self.assertEqual(result.split("\n"), ["keep", IGNORED_TOKEN, "keep too"])
+
+    def test_no_patterns_is_a_passthrough(self):
+        self.assertEqual(_apply_ignore_lines("a\nb", []), "a\nb")
+
+    def test_non_matching_text_unchanged(self):
+        self.assertEqual(_apply_ignore_lines("a\nb", ["^zzz"]), "a\nb")
+
+
+class QuoteName(unittest.TestCase):
+    """Filenames come from the compared tree — untrusted — into a shell=True line."""
+
+    def test_metacharacters_are_quoted(self):
+        quoted = _quote_name("x&mkdir OWNED&.c")
+        self.assertTrue(quoted[0] in "'\"" and quoted[-1] in "'\"")
+        self.assertIn("x&mkdir OWNED&.c", quoted)
+
+    def test_command_substitutes_the_quoted_name(self):
+        command = _command_for("clang-format", "my file.c")
+        self.assertIn(_quote_name("my file.c"), command)
+        self.assertNotIn("=my file.c", command)
+
+    def test_plain_name_still_substituted(self):
+        self.assertIn("sensor.c", _command_for("clang-format", "sensor.c"))
+
+    def test_unknown_step_is_still_run_as_written(self):
+        self.assertTrue(_command_for("tr -d x", "a.c").startswith("tr -d x"))
+
+
+class PrepareCopy(unittest.TestCase):
+    def setUp(self):
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+        self.src = os.path.join(self.work, "src")
+        self.dst = os.path.join(self.work, "dst")
+        os.makedirs(self.src)
+
+    def _write(self, name, data):
+        path = os.path.join(self.src, name)
+        with open(path, "wb") as handle:
+            handle.write(data)
+        return path
+
+    def test_undecodable_bytes_are_left_byte_identical(self):
+        # errors="replace" would fold every bad byte to U+FFFD, making two
+        # different cp1252 files identical after normalization — i.e. "noise".
+        original = b'const char *mode = "caf\xe9";\n'
+        self._write("enc.c", original)
+        prepare_copy(self.src, self.dst, [{"match": ["*.c"], "ignore_lines": ["^// NOTE"]}])
+        with open(os.path.join(self.dst, "enc.c"), "rb") as handle:
+            self.assertEqual(handle.read(), original)
+
+    def test_read_only_file_does_not_abort_the_run(self):
+        path = self._write("ro.c", b"int a;\n")
+        os.chmod(path, stat.S_IREAD)
+        self.addCleanup(os.chmod, path, stat.S_IWRITE)
+        prepare_copy(self.src, self.dst, [{"match": ["*.c"], "ignore_lines": ["^int"]}])
+        copied = os.path.join(self.dst, "ro.c")
+        os.chmod(copied, stat.S_IWRITE)
+        self.assertTrue(os.path.isfile(copied))
+
+    def test_ignore_lines_still_applied_to_a_normal_file(self):
+        self._write("v.h", b"#define BUILD_NUMBER 7\nint a;\n")
+        prepare_copy(self.src, self.dst, [{"match": ["*.h"], "ignore_lines": [r"^#define BUILD"]}])
+        with open(os.path.join(self.dst, "v.h"), "r", encoding="utf-8") as handle:
+            self.assertEqual(handle.read().split("\n")[0], IGNORED_TOKEN)
+
+
+class ProgramOf(unittest.TestCase):
+    def test_plain_command(self):
+        self.assertEqual(_program_of("clang-format -style=LLVM"), "clang-format")
+
+    def test_quoted_path_with_spaces(self):
+        self.assertEqual(_program_of('"C:/Program Files/py.exe" -c "x"'), "C:/Program Files/py.exe")
+
+
+# --- gitdiff -----------------------------------------------------------------
+
+
+class PathHandling(unittest.TestCase):
+    def test_unquote_c_style(self):
+        self.assertEqual(_unquote(r'"C:\\Users\\x/f.c"'), r"C:\Users\x/f.c")
+
+    def test_unquote_passthrough(self):
+        self.assertEqual(_unquote("plain/path.c"), "plain/path.c")
+
+    def test_relativize_strips_root(self):
+        self.assertEqual(_relativize("/tmp/v1/src/f.c", ["/tmp/v1", "/tmp/v2"]), "src/f.c")
+
+    def test_relativize_temp_copy_names(self):
+        self.assertEqual(_relativize("A/sensor.c", ["A", "B"]), "sensor.c")
+
+    def test_relativize_unknown_root_passthrough(self):
+        self.assertEqual(_relativize("other/f.c", ["A", "B"]), "other/f.c")
+
+
+class ParseNameStatus(unittest.TestCase):
+    def test_modified_and_added(self):
+        out = "M\tA/one.c\nA\tB/two.c\n"
+        parsed = _parse_name_status(out, ["A", "B"])
+        self.assertEqual(parsed["one.c"][0], "M")
+        self.assertEqual(parsed["two.c"][0], "A")
+
+    def test_rename_is_keyed_by_new_path(self):
+        parsed = _parse_name_status("R100\tA/old.c\tB/new.c\n", ["A", "B"])
+        self.assertIn("new.c", parsed)
+        self.assertEqual(parsed["new.c"][0], "R")
+
+    def test_quoted_windows_path_is_unquoted(self):
+        # This is the shape git emits on Windows: C-quoted with escaped backslashes.
+        out = 'M\t"C:\\\\tmp\\\\v1/sensor.c"\n'
+        self.assertEqual(list(_parse_name_status(out, ["C:/tmp/v1"])), ["sensor.c"])
+
+    def test_quoted_path_with_a_space(self):
+        self.assertEqual(list(_parse_name_status('M\t"A/my file.c"\n', ["A", "B"])), ["my file.c"])
+
+    def test_backslash_in_a_filename_becomes_a_separator(self):
+        # Accepted limitation: separators are normalized to '/' so paths compare
+        # consistently across platforms, so a POSIX file literally named 'od\d.c'
+        # is reported as 'od/d.c'. Windows correctness is worth more than this case.
+        self.assertEqual(list(_parse_name_status('M\t"A/od\\\\d.c"\n', ["A", "B"])), ["od/d.c"])
+
+    def test_empty_output(self):
+        self.assertEqual(_parse_name_status("", ["A", "B"]), {})
+
+
+class ClassifyNoise(unittest.TestCase):
+    """'Noise only' must mean 'differs before normalization but not after'."""
+
+    def test_rename_old_path_is_not_noise(self):
+        # Normalization raises similarity, so the pass can detect a rename the raw
+        # pass saw as add+delete. The old path no longer exists in either form.
+        raw = {"new.c": ("A", ["new.c"]), "old.c": ("D", ["old.c"])}
+        normalized = {"new.c": ("R", ["old.c", "new.c"])}
+        self.assertEqual(_noise(raw, normalized, set()), set())
+
+    def test_genuine_noise_is_still_detected(self):
+        self.assertEqual(_noise({"util.h": ("M", ["util.h"])}, {}, set()), {"util.h"})
+
+    def test_skipped_is_never_noise(self):
+        raw = {"build.log": ("M", ["build.log"])}
+        self.assertEqual(_noise(raw, {}, {"build.log"}), set())
+
+
+class SplitSections(unittest.TestCase):
+    def test_keys_by_file_and_strips_copy_prefix(self):
+        diff = (
+            "diff --git a/A/one.c b/B/one.c\n"
+            "--- a/A/one.c\n+++ b/B/one.c\n@@ -1 +1 @@\n-a\n+b\n"
+            "diff --git a/A/two.c b/B/two.c\n"
+            "--- a/A/two.c\n+++ b/B/two.c\n@@ -1 +1 @@\n-c\n+d\n"
+        )
+        sections = _split_sections(diff, "A", "B")
+        self.assertEqual(sorted(sections), ["one.c", "two.c"])
+        self.assertIn("+++ b/one.c", sections["one.c"])
+        self.assertNotIn("A/", sections["one.c"])
+
+    def test_deleted_file_uses_the_minus_line(self):
+        diff = "diff --git a/A/gone.c b/B/gone.c\n--- a/A/gone.c\n+++ /dev/null\n@@ -1 +0 @@\n-a\n"
+        self.assertEqual(list(_split_sections(diff, "A", "B")), ["gone.c"])
+
+    def test_added_file_header_keeps_no_copy_prefix(self):
+        # git names both sides under one directory for an add, so stripping only
+        # 'a/<dir_a>/' and 'b/<dir_b>/' leaves the temp copy name in the header.
+        diff = "diff --git a/B/new.c b/B/new.c\n--- /dev/null\n+++ b/B/new.c\n@@ -0,0 +1 @@\n+a\n"
+        sections = _split_sections(diff, "A", "B")
+        self.assertEqual(list(sections), ["new.c"])
+        self.assertNotIn("a/B/", sections["new.c"])
+
+    def test_deleted_file_header_keeps_no_copy_prefix(self):
+        diff = "diff --git a/A/gone.c b/A/gone.c\n--- a/A/gone.c\n+++ /dev/null\n@@ -1 +0 @@\n-a\n"
+        sections = _split_sections(diff, "A", "B")
+        self.assertEqual(list(sections), ["gone.c"])
+        self.assertNotIn("b/A/", sections["gone.c"])
+
+    def test_path_like_content_is_never_rewritten(self):
+        # An unanchored replace of 'a/A/' also edits the diff body, showing the
+        # reviewer a path that appears in no file.
+        diff = (
+            "diff --git a/A/paths.c b/B/paths.c\n"
+            "--- a/A/paths.c\n+++ b/B/paths.c\n@@ -1 +1 @@\n"
+            '-const char *p = "data/A/tables.bin";\n'
+            '+const char *p = "data/A/tables_v2.bin";\n'
+        )
+        body = _split_sections(diff, "A", "B")["paths.c"]
+        self.assertIn('"data/A/tables.bin"', body)
+        self.assertIn("--- a/paths.c", body)
+        self.assertIn("+++ b/paths.c", body)
+
+    def test_binary_notice_loses_the_copy_prefix(self):
+        diff = (
+            "diff --git a/A/img.bin b/B/img.bin\n"
+            "Binary files a/A/img.bin and b/B/img.bin differ\n"
+        )
+        body = _split_sections(diff, "A", "B")["img.bin"]
+        self.assertNotIn("a/A/", body)
+        self.assertNotIn("b/B/", body)
+
+    def test_empty_diff(self):
+        self.assertEqual(_split_sections("", "A", "B"), {})
+
+
+# --- llm ---------------------------------------------------------------------
+
+
+class AnalyzeChanges(unittest.TestCase):
+    """The chat seam makes the whole analysis stage testable without a server."""
+
+    def test_one_call_per_file_plus_a_summary(self):
+        chat = FakeChat()
+        real = {"a.c": ("M", ["a.c"]), "b.c": ("M", ["b.c"])}
+        analyses, summary = analyze_changes(comparison(real=real), chat)
+        self.assertEqual(sorted(analyses), ["a.c", "b.c"])
+        self.assertIsNotNone(summary)
+        self.assertEqual(chat.labels, ["a.c", "b.c", "executive summary"])
+
+    def test_binaries_are_never_sent(self):
+        chat = FakeChat()
+        real = {"a.c": ("M", ["a.c"]), "logo.png": ("M", ["logo.png"])}
+        analyses, _ = analyze_changes(comparison(real=real, binaries={"logo.png"}), chat)
+        self.assertEqual(list(analyses), ["a.c"])
+        self.assertNotIn("logo.png", chat.labels)
+
+    def test_max_files_caps_the_work(self):
+        chat = FakeChat()
+        real = {"%d.c" % i: ("M", []) for i in range(5)}
+        analyses, _ = analyze_changes(comparison(real=real), chat, max_files=2)
+        self.assertEqual(len(analyses), 2)
+
+    def test_failed_calls_produce_no_summary(self):
+        chat = FakeChat(reply=None)
+        analyses, summary = analyze_changes(comparison(), chat)
+        self.assertEqual(analyses, {})
+        self.assertIsNone(summary)
+        self.assertNotIn("executive summary", chat.labels)
+
+    def test_long_diff_is_split_into_parts(self):
+        big = "diff --git a/f.c b/f.c\n--- a/f.c\n+++ b/f.c\n" + "".join(
+            "@@ -%d +%d @@\n-%s\n+%s\n" % (i, i, "x" * 40, "y" * 40) for i in range(6)
+        )
+        chat = FakeChat()
+        analyses, _ = analyze_changes(
+            comparison(real={"f.c": ("M", [])}, sections={"f.c": big}), chat, max_chars=200
+        )
+        part_labels = [label for label in chat.labels if "part" in label]
+        self.assertGreater(len(part_labels), 1)
+        self.assertIn("#### Part 1 of", analyses["f.c"])
+
+    def test_missing_section_is_skipped(self):
+        chat = FakeChat()
+        analyses, _ = analyze_changes(comparison(real={"a.c": ("M", [])}, sections={}), chat)
+        self.assertEqual(analyses, {})
+
+
+# --- output ------------------------------------------------------------------
+
+
+class ExtractRisk(unittest.TestCase):
+    """The level lives in free-form prose, so extraction is the fragile part."""
+
+    def test_plain_level(self):
+        self.assertEqual(_extract_risk("**Risk** — Medium, fine.", "Risk"), "medium")
+
+    def test_allows_does_not_leak_low(self):
+        # "allows" contains "low"; without word boundaries this returns None.
+        self.assertEqual(_extract_risk("**Risk** — Medium, this allows overflow.", "Risk"), "medium")
+
+    def test_below_does_not_leak_low(self):
+        self.assertEqual(_extract_risk("**Risk** — High, see below.", "Risk"), "high")
+
+    def test_template_echo_rejected(self):
+        self.assertIsNone(_extract_risk("**Risk** — Low / Medium / High", "Risk"))
+
+    def test_first_level_wins(self):
+        self.assertEqual(_extract_risk("**Risk** — High, not low as first assessed.", "Risk"), "high")
+
+    def test_most_severe_across_parts(self):
+        text = "**Risk** — Low, minor.\n**Risk** — High, serious."
+        self.assertEqual(_extract_risk(text, "Risk"), "high")
+
+    def test_case_insensitive(self):
+        self.assertEqual(_extract_risk("**risk** — HIGH, bad.", "Risk"), "high")
+
+    def test_prose_mentioning_risk_does_not_escalate(self):
+        # Ordinary review prose names a level without declaring one. Only a
+        # labelled field counts, or "**Risk** — Low" plus one such sentence reads High.
+        text = "**Risk** — Low, a rounding fix.\nReduces the risk of a high reading being missed."
+        self.assertEqual(_extract_risk(text, "Risk"), "low")
+
+    def test_prose_alone_yields_no_level(self):
+        self.assertIsNone(_extract_risk("This lowers the risk of a high-severity fault.", "Risk"))
+
+    def test_colon_separator_is_a_label(self):
+        self.assertEqual(_extract_risk("**Risk**: High, overflow.", "Risk"), "high")
+
+    def test_missing_label(self):
+        self.assertIsNone(_extract_risk("Nothing relevant here.", "Risk"))
+
+    def test_empty_text(self):
+        self.assertIsNone(_extract_risk(None, "Risk"))
+        self.assertIsNone(_extract_risk("", "Risk"))
+
+    def test_overall_label(self):
+        self.assertEqual(_extract_risk("**Overall risk** — Medium, ok.", "Overall risk"), "medium")
+
+
+class BuildReport(unittest.TestCase):
+    def test_renders_every_category(self):
+        md = build_report(
+            "v1",
+            "v2",
+            comparison(noise={"util.h"}, skipped={"build.log"}),
+            {"sensor.c": "the analysis"},
+            "the summary",
+        )
+        self.assertIn("| Real changes | 1 |", md)
+        self.assertIn("| `sensor.c` | modified |", md)
+        self.assertIn("| `util.h` | noise only |", md)
+        self.assertIn("| `build.log` | skipped |", md)
+        self.assertIn("## Executive summary", md)
+        self.assertIn("the analysis", md)
+        self.assertIn("<details><summary>Show diff</summary>", md)
+
+    def test_no_summary_section_without_llm(self):
+        self.assertNotIn("## Executive summary", build_report("v1", "v2", comparison(), {}, None))
+
+    def test_binary_gets_a_note_instead_of_a_diff(self):
+        md = build_report("v1", "v2", comparison(binaries={"sensor.c"}), {}, None)
+        self.assertIn("Binary file — not analyzed", md)
+        self.assertNotIn("Show diff", md)
+
+    def test_no_differences_at_all(self):
+        md = build_report("v1", "v2", comparison(real={}, sections={}), {}, None)
+        self.assertIn("no differences", md)
+        self.assertIn("No substantive changes remain", md)
+
+
+class BuildJson(unittest.TestCase):
+    def test_shape_with_analysis(self):
+        payload = build_json(
+            "v1",
+            "v2",
+            comparison(noise={"util.h"}, skipped={"build.log"}),
+            {"sensor.c": "**Risk** — High, serious."},
+            "**Overall risk** — Medium, ok.",
+        )
+        self.assertEqual(payload["counts"], {"real": 1, "noise": 1, "skipped": 1})
+        self.assertTrue(payload["llm_ran"])
+        self.assertEqual(payload["real"][0]["risk"], "high")
+        self.assertEqual(payload["summary"]["risk"], "medium")
+        self.assertEqual(payload["noise"], ["util.h"])
+        self.assertEqual(payload["skipped"], ["build.log"])
+
+    def test_nulls_without_llm(self):
+        payload = build_json("v1", "v2", comparison(), {}, None)
+        self.assertFalse(payload["llm_ran"])
+        self.assertIsNone(payload["real"][0]["analysis"])
+        self.assertIsNone(payload["real"][0]["risk"])
+        self.assertIsNone(payload["summary"]["risk"])
+        self.assertIn("diff --git", payload["real"][0]["diff"])
+
+    def test_binary_flag(self):
+        payload = build_json("v1", "v2", comparison(binaries={"sensor.c"}), {}, None)
+        self.assertTrue(payload["real"][0]["binary"])
+
+
+class SideBySide(unittest.TestCase):
+    """Aligning a unified diff into two panes, the way a compare tool shows it."""
+
+    def test_context_line_appears_on_both_sides(self):
+        rows = _side_by_side("@@ -10,3 +10,3 @@\n int a;\n-int b;\n+int c;\n")
+        self.assertEqual(rows[0].kind, "ctx")
+        self.assertEqual((rows[0].left_no, rows[0].right_no), (10, 10))
+        self.assertEqual(rows[0].left, rows[0].right)
+
+    def test_edited_line_pairs_old_and_new_on_one_row(self):
+        rows = _side_by_side("@@ -1 +1 @@\n-int b;\n+int c;\n")
+        self.assertEqual([row.kind for row in rows], ["chg"])
+        self.assertEqual((rows[0].left, rows[0].right), ("int b;", "int c;"))
+
+    def test_added_line_has_an_empty_left_side(self):
+        rows = _side_by_side("@@ -1,0 +1,1 @@\n+int c;\n")
+        self.assertEqual(rows[0].kind, "add")
+        self.assertIsNone(rows[0].left_no)
+        self.assertEqual(rows[0].right, "int c;")
+
+    def test_deleted_line_has_an_empty_right_side(self):
+        rows = _side_by_side("@@ -1,1 +1,0 @@\n-int b;\n")
+        self.assertEqual(rows[0].kind, "del")
+        self.assertIsNone(rows[0].right_no)
+        self.assertEqual(rows[0].left, "int b;")
+
+    def test_uneven_runs_pair_then_spill(self):
+        rows = _side_by_side("@@ -1,1 +1,3 @@\n-a\n+x\n+y\n+z\n")
+        self.assertEqual([row.kind for row in rows], ["chg", "add", "add"])
+
+    def test_line_numbers_advance_from_the_hunk_header(self):
+        rows = _side_by_side("@@ -5,3 +9,3 @@\n a\n b\n c\n")
+        self.assertEqual([row.left_no for row in rows], [5, 6, 7])
+        self.assertEqual([row.right_no for row in rows], [9, 10, 11])
+
+    def test_file_header_lines_are_not_rows(self):
+        section = (
+            "diff --git a/x.c b/x.c\nindex 1..2 100644\n--- a/x.c\n+++ b/x.c\n"
+            "@@ -1 +1 @@\n-a\n+b\n"
+        )
+        self.assertEqual([row.kind for row in _side_by_side(section)], ["chg"])
+
+    def test_second_hunk_is_separated_by_a_gap(self):
+        section = "@@ -1 +1 @@\n-a\n+b\n@@ -9 +9 @@\n-c\n+d\n"
+        self.assertEqual([row.kind for row in _side_by_side(section)], ["chg", "gap", "chg"])
+
+    def test_new_file_hunk_starting_at_zero_still_yields_rows(self):
+        rows = _side_by_side("@@ -0,0 +1,2 @@\n+a\n+b\n")
+        self.assertEqual([row.kind for row in rows], ["add", "add"])
+        self.assertEqual([row.right_no for row in rows], [1, 2])
+
+
+class MarkPair(unittest.TestCase):
+    def test_similar_lines_mark_only_what_differs(self):
+        left, right = _mark_pair("int a = 1;", "int a = 2;")
+        self.assertIn(">1</mark>", left)
+        self.assertIn(">2</mark>", right)
+        self.assertTrue(left.startswith("int a = "))
+
+    def test_dissimilar_lines_are_not_marked(self):
+        # Marking every character of an unrelated pair is noise, not information.
+        left, right = _mark_pair("if (a<b) {}", "<script>alert(1)</script>")
+        self.assertNotIn("<mark", left + right)
+        self.assertIn("&lt;script&gt;", right)
+        self.assertIn("a&lt;b", left)
+
+
+class BuildHtml(unittest.TestCase):
+    """The HTML report must be a complete, self-contained, offline-safe document."""
+
+    def test_is_a_complete_document(self):
+        html = build_html("v1", "v2", comparison(), {}, None)
+        self.assertTrue(html.lstrip().lower().startswith("<!doctype html>"))
+        self.assertIn("</html>", html)
+
+    def test_no_external_references(self):
+        # The target is an air-gapped box: a report that fetches anything is broken.
+        html = build_html("v1", "v2", comparison(), {"sensor.c": "text"}, "summary")
+        for forbidden in ("http://", "https://", "<link", "<img", "src=", "@import"):
+            self.assertNotIn(forbidden, html)
+
+    def test_counts_are_tagged_for_each_category(self):
+        html = build_html(
+            "v1", "v2", comparison(noise={"util.h"}, skipped={"build.log"}), {}, None
+        )
+        self.assertIn('data-kind="real" data-count="1"', html)
+        self.assertIn('data-kind="noise" data-count="1"', html)
+        self.assertIn('data-kind="skipped" data-count="1"', html)
+
+    def test_every_category_appears_in_the_file_table(self):
+        html = build_html(
+            "v1", "v2", comparison(noise={"util.h"}, skipped={"build.log"}), {}, None
+        )
+        self.assertIn('data-status="modified"', html)
+        self.assertIn('data-status="noise only"', html)
+        self.assertIn('data-status="skipped"', html)
+        self.assertIn("<code>util.h</code>", html)
+
+    def test_summary_section_only_when_there_is_a_summary(self):
+        self.assertNotIn('id="summary"', build_html("v1", "v2", comparison(), {}, None))
+        self.assertIn('id="summary"', build_html("v1", "v2", comparison(), {}, "the summary"))
+
+    def test_risk_badge_comes_from_the_analysis_text(self):
+        html = build_html("v1", "v2", comparison(), {"sensor.c": "**Risk** — High, serious."}, None)
+        self.assertIn('class="badge risk-high"', html)
+
+    def test_no_risk_badge_without_an_extractable_level(self):
+        html = build_html("v1", "v2", comparison(), {"sensor.c": "no level stated"}, None)
+        self.assertNotIn("badge risk-", html)
+
+    def test_diff_is_rendered_as_two_aligned_panes(self):
+        html = build_html("v1", "v2", comparison(), {}, None)
+        self.assertIn('class="sbs"', html)
+        self.assertIn('class="s-chg"', html)
+
+    def test_panes_are_labelled_with_the_directories(self):
+        html = build_html("src/v1", "src/v2", comparison(), {}, None)
+        self.assertIn('<th colspan="2">src/v1</th>', html)
+        self.assertIn('<th colspan="2">src/v2</th>', html)
+
+    def test_binary_gets_a_note_instead_of_a_diff(self):
+        html = build_html("v1", "v2", comparison(binaries={"sensor.c"}), {}, None)
+        self.assertIn("Binary file", html)
+        self.assertNotIn('class="sbs"', html)
+
+    def test_no_differences_at_all(self):
+        html = build_html("v1", "v2", comparison(real={}, sections={}), {}, None)
+        self.assertIn("No substantive changes remain", html)
+
+    def test_markup_in_a_diff_is_escaped(self):
+        # A diff legitimately contains C like `a <b`, and could contain HTML.
+        evil = "diff --git a/x.c b/x.c\n@@ -1 +1 @@\n-if (a<b) {}\n+<script>alert(1)</script>\n"
+        html = build_html("v1", "v2", comparison(sections={"sensor.c": evil}), {}, None)
+        self.assertNotIn("<script>alert(1)</script>", html)
+        self.assertIn("&lt;script&gt;", html)
+        self.assertIn("a&lt;b", html)
+
+    def test_markup_in_a_filename_is_escaped(self):
+        real = {"<img>.c": ("M", ["<img>.c"])}
+        html = build_html("v1", "v2", comparison(real=real, sections={}), {}, None)
+        self.assertIn("&lt;img&gt;.c", html)
+
+    def test_analysis_prose_is_rendered(self):
+        analysis = "**Summary** — it changed.\n\n**Changes**\n- first thing\n- second thing"
+        html = build_html("v1", "v2", comparison(), {"sensor.c": analysis}, None)
+        self.assertIn("<strong>Summary</strong>", html)
+        self.assertIn("<li>first thing</li>", html)
+        self.assertIn("<li>second thing</li>", html)
+
+    def test_identifiers_with_underscores_are_not_italicised(self):
+        # `SAMPLE_COUNT ... SAMPLE_COUNT` must not be read as an italic span.
+        analysis = "Rounds SAMPLE_COUNT against SAMPLE_COUNT now."
+        html = build_html("v1", "v2", comparison(), {"sensor.c": analysis}, None)
+        self.assertIn("SAMPLE_COUNT against SAMPLE_COUNT", html)
+        self.assertNotIn("<em>", html)
+
+    def test_directories_are_reported(self):
+        html = build_html("src/v1", "src/v2", comparison(), {}, None)
+        self.assertIn("src/v1", html)
+        self.assertIn("src/v2", html)
+
+
+if __name__ == "__main__":
+    unittest.main()
