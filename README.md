@@ -160,53 +160,95 @@ If there is no repository, just remove `"clang-format"` and `"strip-comments"` f
 
 ## Docker (alternative air-gap packaging)
 
-If the target network already runs Docker, the image is a simpler transfer than
-managing Python + git + clang-format + gcc individually. The image bundles all
-four and runs as a non-root user.
+If the target network already runs Docker, one image is a simpler transfer than
+getting Python, git, clang-format and gcc onto the box separately — the image
+bundles all four, so the closed network needs no package repository.
 
-**On the internet-connected machine:**
+Copying the directory is still the lighter option when Python 3.8+ and git are
+already present. Use the image when they are not, or when you want one artifact
+with a checksum instead of a tree.
 
-```bash
-# Build and export as a single gzipped tarball
-bash export-image.sh          # produces dirdiff.tar.gz
-
-# Or manually:
-docker build -t dirdiff .
-docker save dirdiff | gzip > dirdiff.tar.gz
-```
-
-**Transfer** `dirdiff.tar.gz` to the air-gapped machine (USB, secure copy, etc.).
-
-**On the air-gapped machine:**
+### On the connected machine
 
 ```bash
-docker load < dirdiff.tar.gz
-
-docker run --rm \
-  -v /path/to/dir_a:/work/a:ro \
-  -v /path/to/dir_b:/work/b:ro \
-  -v /path/to/config.json:/work/config.json:ro \
-  -v /path/to/output:/out \
-  dirdiff /work/a /work/b \
-    -c /work/config.json \
-    -o /out/report.md \
-    -H /out/report.html \
-    -j /out/report.json
+./export-image.sh export
 ```
 
-Mounts at a glance:
+That builds the image, saves `dirdiff.tar.gz`, and writes `dirdiff.tar.gz.sha256`
+beside it. The build runs the full test suite inside the image, so a broken or
+partial copy fails while you can still do something about it.
+
+### Transfer
+
+Carry **three** files across: the tarball, the `.sha256`, and `export-image.sh`
+itself. The checksum is the only thing standing between a corrupt USB transfer
+and a report you would have trusted.
+
+### On the air-gapped machine
+
+```bash
+./export-image.sh load        # verifies the checksum, then loads the image
+./export-image.sh selftest    # runs the packaged suite and prints the tool versions
+```
+
+Then compare:
+
+```bash
+mkdir -p out
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v "$PWD/v1:/work/v1:ro" \
+  -v "$PWD/v2:/work/v2:ro" \
+  -v "$PWD/config.json:/work/config.json:ro" \
+  -v "$PWD/out:/work/out" \
+  dirdiff v1 v2 -c config.json \
+    -o out/report.md -H out/report.html -j out/report.json \
+  2> out/report.warnings
+```
 
 | Mount | Mode | Purpose |
 |---|:---:|---|
-| `/work/a` | `ro` | Directory A (old version) |
-| `/work/b` | `ro` | Directory B (new version) |
+| `/work/v1` | `ro` | Directory A — the old version |
+| `/work/v2` | `ro` | Directory B — the new version |
 | `/work/config.json` | `ro` | Rule and LLM config |
-| `/out` | `rw` | Where reports are written |
+| `/work/out` | `rw` | Where the reports are written |
 
-The LLM endpoint (`llm.base_url` in `config.json`) must be reachable from
-inside the container — typically a local vLLM or Ollama server on the host.
-Use `host.docker.internal` (Docker Desktop) or the host's LAN IP instead of
-`localhost`. Pass `--no-llm` to skip model analysis entirely.
+`WORKDIR` is `/work`, so the arguments above are plain relative paths; absolute
+paths work equally well. The package itself lives at `/opt/dirdiff`, outside
+`/work`, so a mount cannot shadow it.
+
+### Two things that will bite you if you skip them
+
+**Pass `--user "$(id -u):$(id -g)"`.** Without it the container writes as root
+and the reports land on your host owned by root. The image sets no `USER` for
+exactly this reason: nothing inside needs a particular uid, so the caller
+chooses one and the output is owned by them.
+
+**Directory names become pane headers.** The two arguments are printed verbatim
+at the top of each side-by-side comparison, so mount them under short names —
+`v1` and `v2`, not a full absolute path.
+
+The image also runs `git config --system --add safe.directory '*'`. Bind mounts
+are owned by the host's uid, and without that setting git refuses to touch a
+tree it considers to have "dubious ownership", which fails the comparison before
+it starts.
+
+### The model endpoint
+
+`llm.base_url` must be reachable from **inside** the container, so `localhost`
+means the container itself. Use `host.docker.internal` on Docker Desktop, the
+host's LAN address elsewhere, or `--network host` on Linux. `--no-llm` skips
+model analysis entirely and still produces the full comparison.
+
+### Reproducible builds
+
+`FROM python:3.11-slim` is a moving tag. For a transfer artifact you may need to
+reproduce later, pin it by digest:
+
+```bash
+docker inspect --format '{{index .RepoDigests 0}}' python:3.11-slim
+```
+
+and replace the `FROM` line with the `python@sha256:...` value it prints.
 
 ## Usage
 

@@ -1,20 +1,28 @@
-# Git
+# Everything the image does not need.
+#
+# tests/ is deliberately NOT excluded: the suite is shipped so the closed
+# network can re-verify the package after transfer, and it is a few kilobytes
+# of stdlib unittest with no git, normalizer or network dependency.
+
 .git/
 .gitignore
-
-# Tests (not needed inside the image)
-tests/
-
-# Docs
-docs/
-*.md
-!README.md
-
-# Scratch / dev files
-*.pyc
-__pycache__/
-.venv/
 .claude/
 
-# IDE
+docs/
+*.md
+
+Dockerfile
+.dockerignore
+export-image.sh
+
+__pycache__/
+*.pyc
+.venv/
 .vscode/
+
+# Build and run outputs, in case one was produced in the tree
+*.tar.gz
+*.sha256
+report.md
+report.html
+report.json

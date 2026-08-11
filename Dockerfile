@@ -1,50 +1,49 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# dirdiff — air-gap export image
+# dirdiff — air-gap delivery image.
 #
-# Build:
-#   docker build -t dirdiff .
+# Bundles the one dependency the tool cannot degrade without (git) and the two
+# optional normalizers (clang-format, gcc), so the closed network needs no
+# package repository. See README.md for the build / transfer / run sequence.
 #
-# Export to tar (for transfer to air-gapped machine):
-#   docker save dirdiff | gzip > dirdiff.tar.gz
-#
-# Load on air-gapped machine:
-#   docker load < dirdiff.tar.gz
-#
-# Run:
-#   docker run --rm \
-#     -v /path/to/dir_a:/work/a:ro \
-#     -v /path/to/dir_b:/work/b:ro \
-#     -v /path/to/config.json:/work/config.json:ro \
-#     -v /path/to/output:/out \
-#     dirdiff /work/a /work/b -c /work/config.json -o /out/report.md -H /out/report.html
-# ─────────────────────────────────────────────────────────────────────────────
+# For a reproducible transfer artifact, pin the base image by digest:
+#   docker inspect --format '{{index .RepoDigests 0}}' python:3.11-slim
+# and replace the FROM line with the python@sha256:... value it prints.
 
 FROM python:3.11-slim
 
-# Install git (required), clang-format and gcc (optional normalizers).
-# All installed here so the image is self-contained with no outbound requests.
+LABEL org.opencontainers.image.title="dirdiff" \
+      org.opencontainers.image.description="Rule-based directory comparison, with LLM analysis of the real changes only" \
+      org.opencontainers.image.source="https://github.com/HighOnInformation/NafkaMina"
+
 RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      git \
-      clang-format \
-      gcc \
+ && apt-get install -y --no-install-recommends git clang-format gcc \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
-# Create a non-root user for safer execution inside the container.
-RUN useradd --create-home --shell /bin/bash dirdiff
-USER dirdiff
-WORKDIR /home/dirdiff
+# The compared directories arrive as bind mounts, so they are owned by whatever
+# uid the host uses. Without this, git refuses to touch a tree it considers to
+# have "dubious ownership" and the comparison fails before it starts.
+RUN git config --system --add safe.directory '*'
 
-# Copy only the package and the example config — nothing else.
-COPY --chown=dirdiff:dirdiff dirdiff/ ./dirdiff/
-COPY --chown=dirdiff:dirdiff config.json ./config.json
+# The package lives outside the working directory on purpose: a bind mount over
+# /work must not be able to shadow it.
+ENV PYTHONPATH=/opt/dirdiff \
+    PYTHONDONTWRITEBYTECODE=1
+COPY dirdiff/ /opt/dirdiff/dirdiff/
+COPY tests/ /opt/dirdiff/tests/
+COPY config.json /opt/dirdiff/config.json
 
-# Smoke-test: verify the package imported and the help text prints.
-RUN python -m dirdiff --help
+# Prove the copy is intact while the network still exists. The suite needs no
+# git, no normalizers and no endpoint, so this is a pure integrity check — and
+# it is the same command the target box re-runs after the transfer.
+RUN python -m unittest discover -s /opt/dirdiff/tests \
+ && python -m dirdiff --help > /dev/null
 
-# Default output directory; callers mount their own volume here.
-VOLUME ["/out"]
+# No USER is set, deliberately. Nothing here needs a particular uid — git's
+# config is system-wide and nothing under /opt is written at runtime — so the
+# caller passes --user "$(id -u):$(id -g)" and the reports land owned by them
+# rather than by root. Hardcoding a uid would break exactly that, and would
+# also make every bind-mounted output directory unwritable.
+WORKDIR /work
 
 ENTRYPOINT ["python", "-m", "dirdiff"]
 CMD ["--help"]
