@@ -158,40 +158,73 @@ sudo yum install gcc
 If there is no repository, just remove `"clang-format"` and `"strip-comments"` from the
 `normalize` list in the config and rely on `ignore_lines` alone.
 
-## Docker (alternative air-gap packaging)
+## The transfer set — repo plus dependencies, one directory
 
-If the target network already runs Docker, one image is a simpler transfer than
-getting Python, git, clang-format and gcc onto the box separately — the image
-bundles all four, so the closed network needs no package repository.
-
-Copying the directory is still the lighter option when Python 3.8+ and git are
-already present. Use the image when they are not, or when you want one artifact
-with a checksum instead of a tree.
-
-### On the connected machine
+`airgap.sh` builds everything the closed network needs into `dist/`, checksums it,
+and imports it on the far side.
 
 ```bash
-./export-image.sh export
+./airgap.sh deps debian:12    # optional: the target distro's own .deb/.rpm packages
+./airgap.sh pack              # repo bundle + container image + checksums
 ```
 
-That builds the image, saves `dirdiff.tar.gz`, and writes `dirdiff.tar.gz.sha256`
-beside it. The build runs the full test suite inside the image, so a broken or
-partial copy fails while you can still do something about it.
+| Artifact | What it solves | Size |
+|---|---|---|
+| `dirdiff.bundle` | The whole repository, **all history, one file**. Clone from it offline; bundle back out to return work | ~68 KB |
+| `dirdiff-image.tar.gz` | A container carrying Python, git, clang-format and gcc — no package repository needed | a few hundred MB |
+| `deps/<distro>/` | The same four tools as native packages, with an `install.sh`, for a target with no Docker | varies |
+| `SHA256SUMS`, `IMPORT.txt`, `airgap.sh` | Verification, instructions, and the importer itself | small |
+
+You rarely need all three. Pick by what the target already has:
+
+| Target has | Carry |
+|---|---|
+| Python 3.8+ and git | the bundle alone |
+| Docker | bundle + image |
+| Neither | bundle + `deps/` |
 
 ### Transfer
 
-Carry **three** files across: the tarball, the `.sha256`, and `export-image.sh`
-itself. The checksum is the only thing standing between a corrupt USB transfer
-and a report you would have trusted.
-
-### On the air-gapped machine
+Copy the whole `dist/` directory. **Then, on the far side:**
 
 ```bash
-./export-image.sh load        # verifies the checksum, then loads the image
-./export-image.sh selftest    # runs the packaged suite and prints the tool versions
+./airgap.sh verify     # refuses to continue if the media corrupted anything
+./airgap.sh import     # clones the repo, loads the image if one is present
+./airgap.sh selftest   # runs the 96-test suite HERE, and prints the tool versions
 ```
 
-Then compare:
+`selftest` is the step people skip and should not: it proves the tool runs on
+*that* box, not merely that the bytes arrived. It probes for a working Python
+rather than trusting `PATH` — a `python3` that answers but does not run is a real
+thing, and it would otherwise let the suite silently pass by testing nothing.
+
+### Installing the dependencies natively
+
+`./airgap.sh deps <base-image>` downloads git, clang-format, gcc and python3 —
+with their transitive dependencies — from inside a container of the distro you
+name, so architecture and versions match the target. On the far side:
+
+```bash
+sh deps/debian-12/install.sh --dry-run    # check nothing is missing
+sh deps/debian-12/install.sh              # as root
+```
+
+**The resolution happens against that container's package state**, so name the
+image your target was installed from. `debian:12` packages will not install on
+Rocky 9, and a target more minimal than the image may still want a dependency the
+image already had — which is what `--dry-run` is for.
+
+### Sending work back out
+
+A bundle works in both directions. Commit on the closed network, then:
+
+```bash
+git bundle create outbound.bundle --all
+```
+
+Carry that file out and `git fetch outbound.bundle` on the connected side.
+
+### Running the container
 
 ```bash
 mkdir -p out

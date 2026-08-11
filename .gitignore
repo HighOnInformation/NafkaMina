@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# Air-gap transfer set built by airgap.sh — artifacts, not sources
+dist/
