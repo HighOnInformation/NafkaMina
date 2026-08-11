@@ -158,6 +158,56 @@ sudo yum install gcc
 If there is no repository, just remove `"clang-format"` and `"strip-comments"` from the
 `normalize` list in the config and rely on `ignore_lines` alone.
 
+## Docker (alternative air-gap packaging)
+
+If the target network already runs Docker, the image is a simpler transfer than
+managing Python + git + clang-format + gcc individually. The image bundles all
+four and runs as a non-root user.
+
+**On the internet-connected machine:**
+
+```bash
+# Build and export as a single gzipped tarball
+bash export-image.sh          # produces dirdiff.tar.gz
+
+# Or manually:
+docker build -t dirdiff .
+docker save dirdiff | gzip > dirdiff.tar.gz
+```
+
+**Transfer** `dirdiff.tar.gz` to the air-gapped machine (USB, secure copy, etc.).
+
+**On the air-gapped machine:**
+
+```bash
+docker load < dirdiff.tar.gz
+
+docker run --rm \
+  -v /path/to/dir_a:/work/a:ro \
+  -v /path/to/dir_b:/work/b:ro \
+  -v /path/to/config.json:/work/config.json:ro \
+  -v /path/to/output:/out \
+  dirdiff /work/a /work/b \
+    -c /work/config.json \
+    -o /out/report.md \
+    -H /out/report.html \
+    -j /out/report.json
+```
+
+Mounts at a glance:
+
+| Mount | Mode | Purpose |
+|---|:---:|---|
+| `/work/a` | `ro` | Directory A (old version) |
+| `/work/b` | `ro` | Directory B (new version) |
+| `/work/config.json` | `ro` | Rule and LLM config |
+| `/out` | `rw` | Where reports are written |
+
+The LLM endpoint (`llm.base_url` in `config.json`) must be reachable from
+inside the container — typically a local vLLM or Ollama server on the host.
+Use `host.docker.internal` (Docker Desktop) or the host's LAN IP instead of
+`localhost`. Pass `--no-llm` to skip model analysis entirely.
+
 ## Usage
 
 Run it as a module, from the directory holding `dirdiff/`:

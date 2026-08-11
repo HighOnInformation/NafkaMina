@@ -1,0 +1,20 @@
+# Git
+.git/
+.gitignore
+
+# Tests (not needed inside the image)
+tests/
+
+# Docs
+docs/
+*.md
+!README.md
+
+# Scratch / dev files
+*.pyc
+__pycache__/
+.venv/
+.claude/
+
+# IDE
+.vscode/
