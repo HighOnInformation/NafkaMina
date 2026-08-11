@@ -17,6 +17,7 @@ from .common import warn
 from .compare import compare
 from .llm import analyze_changes, http_chat
 from .output import build_html, build_json, build_report
+from .symbols import cross_reference
 
 
 def main(argv=None):
@@ -38,6 +39,7 @@ def main(argv=None):
 
     llm = config.get("llm") or {}
     comparison = compare(dir_a, dir_b, config.get("rules") or [])
+    xref = cross_reference(comparison.sections, dir_b)
 
     analyses, summary = {}, None
     if args.no_llm:
@@ -52,17 +54,17 @@ def main(argv=None):
             max_chars=llm.get("max_chars_per_call", 24000),
         )
 
-    report = build_report(dir_a, dir_b, comparison, analyses, summary)
+    report = build_report(dir_a, dir_b, comparison, analyses, summary, xref=xref)
     if not _write(args.output, report, "report"):
         return 2
 
     if args.html:
-        page = build_html(dir_a, dir_b, comparison, analyses, summary)
+        page = build_html(dir_a, dir_b, comparison, analyses, summary, xref=xref)
         if not _write(args.html, page, "HTML report"):
             return 2
 
     if args.json:
-        payload = build_json(dir_a, dir_b, comparison, analyses, summary)
+        payload = build_json(dir_a, dir_b, comparison, analyses, summary, xref=xref)
         if not _write(args.json, json.dumps(payload, ensure_ascii=False, indent=2) + "\n", "JSON file"):
             return 2
 

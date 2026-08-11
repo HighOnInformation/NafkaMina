@@ -86,6 +86,8 @@ h2{margin:0 0 1.1rem;padding-bottom:.6rem;border-bottom:1px solid var(--line);
 font:600 .78rem/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
 .panel{background:var(--surface);border:1px solid var(--line);
 border-left:3px solid var(--accent);padding:1.3rem 1.5rem}
+.panel.alarm{border-left-color:var(--risk-high)}
+.panel.alarm code{background:var(--risk-high-bg);color:var(--risk-high)}
 .prose p{margin:0 0 .85rem;max-width:68ch}
 .prose p:last-child,.prose ul:last-child{margin-bottom:0}
 .prose ul{margin:0 0 .85rem;padding-left:1.2rem}
@@ -163,7 +165,14 @@ details{open:true}
 _STYLE = _CSS.replace("__LIGHT__", _LIGHT).replace("__DARK__", _DARK)
 
 
-def build_json(dir_a, dir_b, comparison, analyses, summary):
+def _xref_parts(xref):
+    """Normalize an optional CrossReference into two plain dicts."""
+    if xref is None:
+        return {}, {}
+    return dict(xref.removed), dict(xref.dangling)
+
+
+def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None):
     """Machine-readable output for the rest of the pipeline (agent, CI, review bot)."""
     files = []
     for rel in sorted(comparison.real):
@@ -190,15 +199,17 @@ def build_json(dir_a, dir_b, comparison, analyses, summary):
             "skipped": len(comparison.skipped),
         },
         "summary": {"text": summary, "risk": _extract_risk(summary, "Overall risk")},
+        "cross_reference": dict(zip(("removed", "dangling"), _xref_parts(xref))),
         "real": files,
         "noise": sorted(comparison.noise),
         "skipped": sorted(comparison.skipped),
     }
 
 
-def build_report(dir_a, dir_b, comparison, analyses, summary):
+def build_report(dir_a, dir_b, comparison, analyses, summary, xref=None):
     """Render the Markdown report."""
     real, noise, skipped = comparison.real, comparison.noise, comparison.skipped
+    _, dangling = _xref_parts(xref)
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     out = []
     out.append("# Directory comparison report\n")
@@ -215,6 +226,19 @@ def build_report(dir_a, dir_b, comparison, analyses, summary):
     if summary:
         out.append("## Executive summary\n")
         out.append(summary)
+        out.append("")
+
+    if dangling:
+        out.append("## Removed but still referenced\n")
+        out.append(
+            "These definitions were deleted, yet the new tree still names them. "
+            "Found by search, not by a model — verify each one.\n"
+        )
+        out.append("| Symbol | Still named in |")
+        out.append("|---|---|")
+        for symbol in sorted(dangling):
+            files = ", ".join("`%s`" % path for path in dangling[symbol])
+            out.append("| `%s` | %s |" % (symbol, files))
         out.append("")
 
     out.append("## Files\n")
@@ -253,9 +277,10 @@ def build_report(dir_a, dir_b, comparison, analyses, summary):
     return "\n".join(out)
 
 
-def build_html(dir_a, dir_b, comparison, analyses, summary):
+def build_html(dir_a, dir_b, comparison, analyses, summary, xref=None):
     """Render the report as one self-contained HTML file."""
     real, noise, skipped = comparison.real, comparison.noise, comparison.skipped
+    _, dangling = _xref_parts(xref)
     out = ["<!doctype html>", '<html lang="en">', "<head>", '<meta charset="utf-8">']
     out.append('<meta name="viewport" content="width=device-width,initial-scale=1">')
     out.append("<title>Directory comparison — %s / %s</title>" % (escape(dir_a), escape(dir_b)))
@@ -296,6 +321,20 @@ def build_html(dir_a, dir_b, comparison, analyses, summary):
             out.append("<p>%s</p>" % badge)
         out.append(_html_prose(summary))
         out.append("</div></section>")
+
+    if dangling:
+        out.append('<section id="xref"><h2>Removed but still referenced</h2>')
+        out.append('<div class="panel alarm">')
+        out.append(
+            "<p>These definitions were deleted, yet the new tree still names them. "
+            "Found by search, not by a model — verify each one.</p>"
+        )
+        out.append("<table><thead><tr><th>Symbol</th><th>Still named in</th>"
+                   "</tr></thead><tbody>")
+        for symbol in sorted(dangling):
+            files = " ".join("<code>%s</code>" % escape(p) for p in dangling[symbol])
+            out.append("<tr><td><code>%s</code></td><td>%s</td></tr>" % (escape(symbol), files))
+        out.append("</tbody></table></div></section>")
 
     out.append("<section><h2>Files</h2>")
     out.append("<table><thead><tr><th>File</th><th>Status</th></tr></thead><tbody>")

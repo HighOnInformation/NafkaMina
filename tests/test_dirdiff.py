@@ -30,6 +30,8 @@ from dirdiff.output import (
     build_json,
     build_report,
 )
+from dirdiff.symbols import CrossReference as CrossRef
+from dirdiff.symbols import _definitions, cross_reference
 from dirdiff.rules import (
     IGNORED_TOKEN,
     _apply_ignore_lines,
@@ -177,6 +179,131 @@ class ProgramOf(unittest.TestCase):
 
     def test_quoted_path_with_spaces(self):
         self.assertEqual(_program_of('"C:/Program Files/py.exe" -c "x"'), "C:/Program Files/py.exe")
+
+
+# --- symbols -----------------------------------------------------------------
+
+
+class Definitions(unittest.TestCase):
+    """Conservative on purpose: over-reporting is worse than under-reporting."""
+
+    def test_function_definition(self):
+        added, removed = _definitions("@@\n+int sensor_alarm(int reading){\n")
+        self.assertEqual(added, {"sensor_alarm"})
+        self.assertEqual(removed, set())
+
+    def test_removed_function_definition(self):
+        added, removed = _definitions("@@\n-int legacy_calibrate(int raw){\n")
+        self.assertEqual(removed, {"legacy_calibrate"})
+
+    def test_define(self):
+        added, _ = _definitions("@@\n+#define ALARM_LOW 2\n")
+        self.assertEqual(added, {"ALARM_LOW"})
+
+    def test_a_call_is_not_a_definition(self):
+        added, _ = _definitions("@@\n+    sensor_alarm(reading);\n")
+        self.assertEqual(added, set())
+
+    def test_a_declaration_without_a_body_is_not_a_definition(self):
+        added, _ = _definitions("@@\n+int sensor_alarm(int reading);\n")
+        self.assertEqual(added, set())
+
+    def test_control_flow_is_not_a_definition(self):
+        for line in ("+if(reading > TEMP_MAX){", "+for(i = 0;", "+while(x){", "+switch(k){"):
+            added, _ = _definitions("@@\n%s\n" % line)
+            self.assertEqual(added, set(), line)
+
+    def test_context_lines_are_neither(self):
+        added, removed = _definitions("@@\n int sensor_alarm(int reading){\n")
+        self.assertEqual((added, removed), (set(), set()))
+
+
+class CrossReference(unittest.TestCase):
+    def setUp(self):
+        self.tree = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tree, True)
+
+    def _write(self, name, text):
+        path = os.path.join(self.tree, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(name) else None
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def test_removed_symbol_still_referenced_is_dangling(self):
+        self._write("caller.c", "int go(void){ return legacy_calibrate(3); }\n")
+        sections = {"legacy.c": "@@\n-int legacy_calibrate(int raw){\n"}
+        result = cross_reference(sections, self.tree)
+        self.assertEqual(result.removed, {"legacy.c": ["legacy_calibrate"]})
+        self.assertEqual(result.dangling, {"legacy_calibrate": ["caller.c"]})
+
+    def test_removed_symbol_nobody_uses_is_not_dangling(self):
+        self._write("caller.c", "int go(void){ return 0; }\n")
+        result = cross_reference({"legacy.c": "@@\n-int legacy_calibrate(int raw){\n"}, self.tree)
+        self.assertEqual(result.dangling, {})
+        self.assertEqual(result.removed, {"legacy.c": ["legacy_calibrate"]})
+
+    def test_a_move_is_not_a_removal(self):
+        # Removed from one file and defined in another: still defined, not dangling.
+        self._write("new.c", "int calib_apply(int r){ return r; }\n")
+        sections = {
+            "old.c": "@@\n-int calib_apply(int r){\n",
+            "new.c": "@@\n+int calib_apply(int r){\n",
+        }
+        result = cross_reference(sections, self.tree)
+        self.assertEqual(result.dangling, {})
+        self.assertEqual(result.removed, {})
+
+    def test_substring_is_not_a_reference(self):
+        self._write("caller.c", "int x = legacy_calibrate_v2(3);\n")
+        result = cross_reference({"legacy.c": "@@\n-int legacy_calibrate(int raw){\n"}, self.tree)
+        self.assertEqual(result.dangling, {})
+
+    def test_binary_files_are_not_searched(self):
+        with open(os.path.join(self.tree, "blob.bin"), "wb") as handle:
+            handle.write(b"\x00legacy_calibrate\x00")
+        result = cross_reference({"legacy.c": "@@\n-int legacy_calibrate(int raw){\n"}, self.tree)
+        self.assertEqual(result.dangling, {})
+
+    def test_no_removals_means_no_work(self):
+        result = cross_reference({"a.c": "@@\n+int added(void){\n"}, self.tree)
+        self.assertEqual((result.removed, result.dangling), ({}, {}))
+
+
+class CrossReferenceRendering(unittest.TestCase):
+    """A dangling reference is a defect signal, so it must be impossible to miss."""
+
+    def setUp(self):
+        self.xref = CrossRef(
+            removed={"legacy.c": ["legacy_calibrate"]},
+            dangling={"legacy_calibrate": ["adc.c"]},
+        )
+        self.empty = CrossRef(removed={}, dangling={})
+
+    def test_markdown_reports_a_dangling_symbol(self):
+        md = build_report("v1", "v2", comparison(), {}, None, xref=self.xref)
+        self.assertIn("legacy_calibrate", md)
+        self.assertIn("adc.c", md)
+
+    def test_markdown_says_nothing_when_there_is_nothing_to_say(self):
+        md = build_report("v1", "v2", comparison(), {}, None, xref=self.empty)
+        self.assertNotIn("still referenced", md.lower())
+
+    def test_html_reports_a_dangling_symbol(self):
+        html = build_html("v1", "v2", comparison(), {}, None, xref=self.xref)
+        self.assertIn("<code>legacy_calibrate</code>", html)
+        self.assertIn('id="xref"', html)
+
+    def test_html_omits_the_panel_when_empty(self):
+        self.assertNotIn('id="xref"', build_html("v1", "v2", comparison(), {}, None, xref=self.empty))
+
+    def test_json_carries_both_halves(self):
+        payload = build_json("v1", "v2", comparison(), {}, None, xref=self.xref)
+        self.assertEqual(payload["cross_reference"]["dangling"], {"legacy_calibrate": ["adc.c"]})
+        self.assertEqual(payload["cross_reference"]["removed"], {"legacy.c": ["legacy_calibrate"]})
+
+    def test_json_without_a_cross_reference_is_explicit(self):
+        payload = build_json("v1", "v2", comparison(), {}, None)
+        self.assertEqual(payload["cross_reference"], {"removed": {}, "dangling": {}})
 
 
 # --- gitdiff -----------------------------------------------------------------

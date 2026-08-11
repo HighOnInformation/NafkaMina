@@ -61,6 +61,40 @@ brace placement, and whoever reads the report does not have to filter it out by 
 | noise only | The file differs between directories, but is identical after normalization |
 | skipped | Matched a rule with `skip: true` — never compared at all |
 
+### Cross-reference — computed, not guessed
+
+Alongside the diff, the tool answers one question the model is bad at and search
+is good at: **what did this change delete that something still uses?**
+
+For every real change it extracts the definitions added and removed — function
+definitions with a body, and `#define`s — then searches the new tree for the
+removed names. Anything still named there gets its own section at the top of the
+report:
+
+| Symbol | Still named in |
+|---|---|
+| `legacy_calibrate` | `adc.c` |
+
+That example is the demo's: `legacy.c` was deleted while `adc.c` still calls it.
+A link error, found without a model, and reported before the reviewer reads a
+single diff.
+
+It is deliberately conservative, and it is not a compiler:
+
+- Only two definition forms are recognised, and a function must carry a body — a
+  prototype moving between headers is not a change in what exists.
+- A symbol removed from one file and defined in another is a **move**, not a
+  removal, and is excluded. The demo's `calib.c` → `calibrate.c` rename produces
+  no findings, correctly.
+- Matching is whole-word, so `legacy_calibrate_v2` is not a reference to
+  `legacy_calibrate`.
+- It reads text; it does not parse C. A name inside a comment or a string counts
+  as a reference. **Verify each finding** — the report says so too.
+
+This runs with `--no-llm`, like the rest of the comparison. The JSON carries both
+halves under `cross_reference`: `removed` (what went away) and `dangling` (what
+still names it).
+
 ## Project layout
 
 ```
