@@ -96,13 +96,15 @@ th{text-align:left;padding:0 .8rem .6rem 0;border-bottom:1px solid var(--line);
 font:500 .7rem/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
 td{padding:.6rem .8rem .6rem 0;border-bottom:1px solid var(--line);vertical-align:middle}
 td code{font:.88rem var(--mono);overflow-wrap:anywhere}
+td a{color:inherit;text-decoration:none}
+td a:hover{text-decoration:underline;color:var(--accent)}
 tr[data-status="noise only"] td,tr[data-status="skipped"] td{color:var(--recessed)}
 .chip{display:inline-block;padding:.28em .55em;border:1px solid var(--line);
 font:.68rem/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
 tr[data-status="added"] .chip{color:var(--add-ink);border-color:var(--add-ink)}
 tr[data-status="deleted"] .chip{color:var(--del-ink);border-color:var(--del-ink)}
 tr[data-status="modified"] .chip,tr[data-status="renamed"] .chip,
-tr[data-status="copied"] .chip{color:var(--accent);border-color:var(--accent)}
+tr[data-status="copied"] .chip,tr[data-status="type changed"] .chip{color:var(--accent);border-color:var(--accent)}
 .badge{display:inline-block;padding:.32em .6em;font:.68rem/1 var(--mono);
 letter-spacing:.1em;text-transform:uppercase}
 .risk-low{color:var(--risk-low);background:var(--risk-low-bg)}
@@ -120,7 +122,8 @@ summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 table.sbs{width:100%;min-width:34rem;table-layout:fixed;border-collapse:collapse;
 font:.8rem/1.6 var(--mono)}
 table.sbs th{padding:.45rem .6rem;background:var(--surface);border-bottom:1px solid var(--line);
-font:500 .68rem/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+font:500 .68rem/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted);
+position:sticky;top:0;z-index:2}
 table.sbs th:first-child{border-right:1px solid var(--line)}
 table.sbs td{padding:.05rem .6rem;vertical-align:top;background:var(--surface);border:0}
 table.sbs col.cn{width:3.4rem}
@@ -130,8 +133,8 @@ table.sbs td.t{white-space:pre-wrap;overflow-wrap:anywhere}
 table.sbs td:nth-child(3){border-left:1px solid var(--line)}
 .s-chg td:nth-child(2){background:var(--del-bg);color:var(--del-ink)}
 .s-chg td:nth-child(4){background:var(--add-bg);color:var(--add-ink)}
-.s-del td:nth-child(2){background:var(--del-bg);color:var(--del-ink)}
-.s-add td:nth-child(4){background:var(--add-bg);color:var(--add-ink)}
+.s-del td:nth-child(2){background:var(--del-bg);color:var(--del-ink);border-left:3px solid var(--del-ink)}
+.s-add td:nth-child(4){background:var(--add-bg);color:var(--add-ink);border-left:3px solid var(--add-ink)}
 .s-del td:nth-child(3),.s-del td:nth-child(4){background:var(--filler)}
 .s-add td:nth-child(1),.s-add td:nth-child(2){background:var(--filler)}
 .s-gap td{background:var(--ground);color:var(--recessed);text-align:center;
@@ -147,6 +150,14 @@ background-image:linear-gradient(var(--hover),var(--hover));
 box-shadow:inset 0 1px 0 var(--accent),inset 0 -1px 0 var(--accent)}
 table.sbs tbody tr:not(.s-gap):hover td.n{color:var(--ink)}
 .empty{margin:0;color:var(--muted)}
+@media print{
+body{background:#fff;color:#000}
+.wrap{max-width:none;padding:0}
+.scroll{overflow:visible}
+table.sbs{width:100%}
+tr{break-inside:avoid}
+details{open:true}
+}
 """
 
 _STYLE = _CSS.replace("__LIGHT__", _LIGHT).replace("__DARK__", _DARK)
@@ -289,7 +300,7 @@ def build_html(dir_a, dir_b, comparison, analyses, summary):
     out.append("<section><h2>Files</h2>")
     out.append("<table><thead><tr><th>File</th><th>Status</th></tr></thead><tbody>")
     for rel in sorted(real):
-        out.append(_file_row(rel, _STATUS_LABELS.get(real[rel][0], real[rel][0])))
+        out.append(_file_row(rel, _STATUS_LABELS.get(real[rel][0], real[rel][0]), is_real=True))
     for rel in sorted(noise):
         out.append(_file_row(rel, "noise only"))
     for rel in sorted(skipped):
@@ -315,17 +326,20 @@ def build_html(dir_a, dir_b, comparison, analyses, summary):
 # --- internals ---------------------------------------------------------------
 
 
-def _file_row(rel, status):
-    return '<tr data-status="%s"><td><code>%s</code></td><td><span class="chip">%s</span></td></tr>' % (
+def _file_row(rel, status, is_real=False):
+    code_text = "<code>%s</code>" % escape(rel)
+    if is_real:
+        code_text = '<a href="#file-%s">%s</a>' % (escape(rel), code_text)
+    return '<tr data-status="%s"><td>%s</td><td><span class="chip">%s</span></td></tr>' % (
         escape(status),
-        escape(rel),
+        code_text,
         escape(status),
     )
 
 
 def _change_block(rel, comparison, analyses, real, dir_a, dir_b):
     status = _STATUS_LABELS.get(real[rel][0], real[rel][0])
-    parts = ['<article class="change">']
+    parts = ['<article class="change" id="file-%s">' % escape(rel)]
     heading = ["<h3><code>%s</code>" % escape(rel), '<span class="chip">%s</span>' % escape(status)]
     badge = _risk_badge(analyses.get(rel), "Risk")
     if badge:
@@ -367,7 +381,7 @@ def _side_by_side(section):
     A run of deleted lines meeting a run of added lines is paired positionally, so
     an edited line carries its old and new text on one row; whatever is left over
     gets a blank cell opposite it. Line numbers come from the hunk header, which
-    is also where a gap row goes — the reader needs to see that lines were skipped.
+    is also where a gap row goes -- the reader needs to see that lines were skipped.
     """
     rows, dels, adds = [], [], []
     left_no = right_no = 0

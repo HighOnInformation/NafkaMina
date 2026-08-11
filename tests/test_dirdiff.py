@@ -629,6 +629,20 @@ class BuildHtml(unittest.TestCase):
         html = build_html("v1", "v2", comparison(real={}, sections={}), {}, None)
         self.assertIn("No substantive changes remain", html)
 
+    def test_sticky_headers_and_print_styles_are_declared(self):
+        html = build_html("v1", "v2", comparison(), {}, None)
+        self.assertIn("position:sticky;top:0", html)
+        self.assertIn("@media print", html)
+
+    def test_summary_file_rows_have_anchor_links_to_change_cards(self):
+        html = build_html("v1", "v2", comparison(real={"sensor.c": ("M", ["sensor.c"])}), {}, None)
+        self.assertIn('<a href="#file-sensor.c"><code>sensor.c</code></a>', html)
+        self.assertIn('<article class="change" id="file-sensor.c">', html)
+
+    def test_type_changed_status_chip_is_styled(self):
+        html = build_html("v1", "v2", comparison(real={"device.so": ("T", ["device.so"])}), {}, None)
+        self.assertIn('tr[data-status="type changed"] .chip', html)
+
     def test_markup_in_a_diff_is_escaped(self):
         # A diff legitimately contains C like `a <b`, and could contain HTML.
         evil = "diff --git a/x.c b/x.c\n@@ -1 +1 @@\n-if (a<b) {}\n+<script>alert(1)</script>\n"
