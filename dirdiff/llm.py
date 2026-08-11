@@ -1,51 +1,51 @@
-"""Model analysis of the real changes.
+"""Model analysis of the real changes, in three passes.
 
 Public interface:
     http_chat(llm_config) -> chat
-    analyze_changes(comparison, chat, max_files, max_chars) -> (analyses, summary)
+    analyze_changes(comparison, chat, ...) -> Analysis
+    Analysis                                  namedtuple(brief, analyses, summary)
 
 The seam is `chat`, a callable:
 
     chat(system, user, label) -> str | None
 
 `analyze_changes` never builds a transport of its own — it is handed one. That is
-what lets the whole analysis stage (file capping, hunk splitting, summary folding)
-be tested in-process with a fake, without an HTTP server. `http_chat` is the real
-adapter; a test fake is the second one, which is what makes this a seam worth having.
+what lets the whole analysis stage (orientation, file capping, hunk splitting,
+summary folding) be tested in-process with a fake, without an HTTP server.
+`http_chat` is the real adapter; a test fake is the second one, which is what
+makes this a seam worth having.
 
 A chat callable returns None on failure rather than raising, so a dead endpoint
 degrades the report instead of killing the run.
+
+The three passes exist because a file read in isolation cannot be understood:
+
+  0. Orientation — one cheap call over an inventory of the whole change (files,
+     churn, symbols added and removed, definitions deleted while still
+     referenced) and NOT the diffs. Skipped when there is only one file, which
+     has no whole to orient against.
+  1. Per file — the same call as before, now carrying the orientation brief, so
+     each file is read in context rather than in a vacuum. No extra calls.
+  2. Reconciliation — the summary, now given the inventory as well as the
+     per-file analyses, and asked which earlier conclusions the whole change
+     revises.
+
+Total: N + 2 calls, one more than before regardless of how large the drop is.
 """
 
+import collections
 import json
 import urllib.request
 
 from .common import warn
+from .settings import load as _load_settings
 
-_SYSTEM_FILE = """You are a senior software engineer reviewing a code change.
+Analysis = collections.namedtuple("Analysis", "brief analyses summary")
 
-The diff below has already been filtered automatically: comments, formatting,
-whitespace and generated lines (timestamps, build numbers) were removed from it.
-Every change that remains is therefore substantive — do not describe it as
-stylistic.
-
-Answer in English, using exactly this structure:
-
-**Summary** — one sentence.
-
-**Changes**
-- one bullet per substantive change.
-
-**Risk** — Low, Medium or High, followed by a short justification."""
-
-_SYSTEM_SUMMARY = """You are the lead code reviewer. Below are analyses of individual
-changed files, already filtered of formatting noise. Write an executive summary:
-what actually changed, the practical implications, and what deserves attention
-during review. End with a separate line in this exact format:
-
-**Overall risk** — Low, Medium or High, followed by a short justification.
-
-Be concise and do not repeat detail that already appears in the analyses."""
+_STATUS_WORDS = {
+    "A": "added", "D": "deleted", "M": "modified",
+    "R": "renamed", "C": "copied", "T": "type changed",
+}
 
 
 def http_chat(llm):
@@ -61,12 +61,11 @@ def http_chat(llm):
     return chat
 
 
-def analyze_changes(comparison, chat, max_files=50, max_chars=24000):
-    """Analyze every real change, then fold the results into one summary.
+def analyze_changes(comparison, chat, prompts=None, xref=None, max_files=50, max_chars=24000):
+    """Orient, analyze every real change, then reconcile the results."""
+    if prompts is None:
+        prompts = _load_settings({}).prompts
 
-    Returns (analyses, summary): a {path: text} mapping and the executive summary,
-    either of which may be empty or None if the model produced nothing.
-    """
     targets = [rel for rel in sorted(comparison.real) if rel not in comparison.binaries]
     if len(targets) > max_files:
         warn(
@@ -75,20 +74,86 @@ def analyze_changes(comparison, chat, max_files=50, max_chars=24000):
         )
         targets = targets[:max_files]
 
+    manifest = _manifest(comparison, xref, targets)
+    brief = None
+    if len(targets) > 1:
+        brief = chat(
+            prompts["orient_system"],
+            prompts["orient_user"].format(manifest=manifest),
+            "orientation",
+        )
+    context = prompts["context_block"].format(brief=brief) if brief else ""
+
     analyses = {}
     for rel in targets:
         section = comparison.sections.get(rel)
         if not section:
             continue
-        answer = _analyze_file(chat, rel, section, max_chars)
+        answer = _analyze_file(chat, rel, section, max_chars, prompts, context)
         if answer:
             analyses[rel] = answer
 
-    summary = _summarize(chat, sorted(analyses.items()), max_chars) if analyses else None
-    return analyses, summary
+    summary = None
+    if analyses:
+        body = "\n\n".join(
+            prompts["summary_item"].format(path=rel, analysis=text)
+            for rel, text in sorted(analyses.items())
+        )
+        if len(body) > max_chars:
+            body = body[:max_chars] + "\n\n[analyses truncated due to length limit]"
+        summary = chat(
+            prompts["summary_system"],
+            prompts["summary_user"].format(manifest=manifest, analyses=body),
+            "executive summary",
+        )
+
+    return Analysis(brief=brief, analyses=analyses, summary=summary)
 
 
 # --- internals ---------------------------------------------------------------
+
+
+def _manifest(comparison, xref, targets):
+    """An inventory of the whole change: everything except the code.
+
+    Deliberately cheap — a few hundred tokens for a whole drop — because its job
+    is to let one call establish what the change is before any file is read.
+    """
+    real, noise, skipped = comparison.real, comparison.noise, comparison.skipped
+    lines = [
+        "Change inventory",
+        "%d real, %d noise only, %d skipped." % (len(real), len(noise), len(skipped)),
+        "",
+        "Files carrying substantive change:",
+    ]
+    removed = dict(xref.removed) if xref else {}
+    for rel in targets:
+        status = _STATUS_WORDS.get(real[rel][0], real[rel][0]) if rel in real else "changed"
+        detail = "- %s (%s)" % (rel, status)
+        section = comparison.sections.get(rel, "")
+        added_lines = sum(
+            1 for line in section.split("\n") if line.startswith("+") and not line.startswith("+++")
+        )
+        removed_lines = sum(
+            1 for line in section.split("\n") if line.startswith("-") and not line.startswith("---")
+        )
+        detail += ", +%d/-%d lines" % (added_lines, removed_lines)
+        if rel in removed:
+            detail += ", removes: %s" % ", ".join(removed[rel])
+        lines.append(detail)
+
+    if comparison.binaries:
+        lines.append("")
+        lines.append("Binary, not analysed: %s" % ", ".join(sorted(comparison.binaries)))
+
+    dangling = dict(xref.dangling) if xref else {}
+    if dangling:
+        lines.append("")
+        lines.append("Deleted but still named in the new tree (found by search, verify each):")
+        for symbol in sorted(dangling):
+            lines.append("- %s, still named in %s" % (symbol, ", ".join(dangling[symbol])))
+
+    return "\n".join(lines)
 
 
 def _post(llm, system, user):
@@ -116,31 +181,28 @@ def _post(llm, system, user):
     return data["choices"][0]["message"]["content"].strip()
 
 
-def _analyze_file(chat, rel, section, max_chars):
+def _analyze_file(chat, rel, section, max_chars, prompts, context):
     """Analyze one file's diff, splitting it across calls when it is too long."""
     if len(section) <= max_chars:
-        return chat(_SYSTEM_FILE, "File: %s\n\n```diff\n%s```" % (rel, section), rel)
+        return chat(
+            prompts["file_system"],
+            prompts["file_user"].format(context=context, path=rel, diff=section),
+            rel,
+        )
 
     parts = _split_by_hunks(section, max_chars)
     pieces = []
     for number, part in enumerate(parts, 1):
         answer = chat(
-            _SYSTEM_FILE,
-            "File: %s\nThis is part %d of %d of the diff.\n\n```diff\n%s```"
-            % (rel, number, len(parts), part),
+            prompts["file_system"],
+            prompts["part_user"].format(
+                context=context, path=rel, diff=part, part=number, parts=len(parts)
+            ),
             "%s (part %d/%d)" % (rel, number, len(parts)),
         )
         if answer:
             pieces.append("#### Part %d of %d\n\n%s" % (number, len(parts), answer))
     return "\n\n".join(pieces) if pieces else None
-
-
-def _summarize(chat, analyses, max_chars):
-    """Fold all per-file analyses into one reviewer-level summary."""
-    body = "\n\n".join("## %s\n%s" % (rel, text) for rel, text in analyses)
-    if len(body) > max_chars:
-        body = body[:max_chars] + "\n\n[analyses truncated due to length limit]"
-    return chat(_SYSTEM_SUMMARY, body, "executive summary")
 
 
 def _split_by_hunks(section, limit):

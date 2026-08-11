@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-python -m unittest discover -s tests                    # full suite (93 tests, no git/network needed)
+python -m unittest discover -s tests                    # full suite (139 tests, no git/network needed)
 cd tests && python -m unittest test_dirdiff.ExtractRisk.test_plain_level   # a single test or class
 python -m unittest discover -s tests -k test_plain_level                   # or by name pattern
 
@@ -45,10 +45,24 @@ files are physically deleted from both copies before the second diff.
 **Dependency direction is strictly one-way** and there are no import cycles:
 
 ```
-common  ←  gitdiff, rules  ←  compare  ←  cli  →  llm, output
+common  ←  gitdiff, rules  ←  compare, symbols  ←  cli  →  llm, output
+settings  ←  llm, cli                    (settings imports nothing from the package)
 ```
 
 Keep it that way. `output.py` and `llm.py` are leaves that `cli` wires together.
+
+**Inputs are data, not code.** `settings.py` resolves the prompts, the risk labels
+and the normalizer command lines from the config, falling back to built-in defaults.
+Anything the model is told, or any command run against a source file, belongs there —
+not as a module constant. Two coupled facts to preserve: the risk labels must travel
+with the prompts (extraction looks for the literal label the prompt asks for), and
+placeholders are validated at load so a typo is a startup error rather than a mangled
+prompt discovered mid-run.
+
+**The analysis runs in three passes**, not one loop: orientation over a manifest that
+carries no code, then per-file with that brief injected, then reconciliation over the
+manifest plus every analysis. `analyze_changes` returns an `Analysis` namedtuple.
+When adding a pass, keep the call count proportional to N + a constant.
 
 **Each module has one documented public interface**, listed in its docstring; everything else is
 underscore-prefixed and internal. When adding a function, default to underscore-prefixed and only

@@ -15,8 +15,9 @@ import sys
 
 from .common import warn
 from .compare import compare
-from .llm import analyze_changes, http_chat
+from .llm import Analysis, analyze_changes, http_chat
 from .output import build_html, build_json, build_report
+from .settings import load as load_settings
 from .symbols import cross_reference
 
 
@@ -37,34 +38,48 @@ def main(argv=None):
         sys.stderr.write("Error: cannot read config file '%s': %s\n" % (args.config, exc))
         return 2
 
+    # Prompts and normalizer commands are inputs too. They resolve against the
+    # config file's own directory, so "@prompts/review.md" means what it looks like.
+    try:
+        settings = load_settings(config, os.path.dirname(os.path.abspath(args.config)))
+    except ValueError as exc:
+        sys.stderr.write("Error: %s\n" % exc)
+        return 2
+
     llm = config.get("llm") or {}
-    comparison = compare(dir_a, dir_b, config.get("rules") or [])
+    comparison = compare(dir_a, dir_b, config.get("rules") or [], settings)
     xref = cross_reference(comparison.sections, dir_b)
 
-    analyses, summary = {}, None
+    result = Analysis(brief=None, analyses={}, summary=None)
     if args.no_llm:
         pass
     elif not llm.get("base_url"):
         warn("llm.base_url is not set in the config — producing the report without LLM analysis.")
     else:
-        analyses, summary = analyze_changes(
+        result = analyze_changes(
             comparison,
             http_chat(llm),
+            prompts=settings.prompts,
+            xref=xref,
             max_files=llm.get("max_files", 50),
             max_chars=llm.get("max_chars_per_call", 24000),
         )
+    analyses, summary, brief = result.analyses, result.summary, result.brief
 
-    report = build_report(dir_a, dir_b, comparison, analyses, summary, xref=xref)
+    shared = {"xref": xref, "brief": brief, "risk": settings.risk}
+    report = build_report(dir_a, dir_b, comparison, analyses, summary, **shared)
     if not _write(args.output, report, "report"):
         return 2
 
     if args.html:
-        page = build_html(dir_a, dir_b, comparison, analyses, summary, xref=xref)
+        page = build_html(dir_a, dir_b, comparison, analyses, summary, **shared)
         if not _write(args.html, page, "HTML report"):
             return 2
 
     if args.json:
-        payload = build_json(dir_a, dir_b, comparison, analyses, summary, xref=xref)
+        payload = build_json(
+            dir_a, dir_b, comparison, analyses, summary, settings=settings, **shared
+        )
         if not _write(args.json, json.dumps(payload, ensure_ascii=False, indent=2) + "\n", "JSON file"):
             return 2
 

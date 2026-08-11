@@ -1,70 +1,74 @@
 # dirdiff — rule-based directory comparison
 
 Compares two source directories and separates **substantive change** from **noise**:
-formatting differences, comments, whitespace, and generated timestamps or build
-numbers. Only what survives the filter is sent to a language model for analysis.
+formatting, comments, whitespace, and generated timestamps or build numbers. Only
+what survives the filter reaches a language model.
 
-Standard library only — no pip, no virtualenv, nothing to install. Copy the directory
-onto a closed network and run it.
-
-## Quick start
+Standard library only — no pip, no virtualenv, nothing to install. Built to be
+copied onto a closed network and run.
 
 ```bash
-# 1. Check the box: Python 3.8+, git 2.30+
-python3 -m dirdiff --help
-
-# 2. Compare, without a model — free, deterministic, and complete apart from the prose
-python3 -m dirdiff v1 v2 -c config.json -o report.md --no-llm
-
-# 3. Add the model, an HTML report for a human, and JSON for a machine
-python3 -m dirdiff v1 v2 -c config.json -o report.md -H report.html -j report.json
+python3 -m dirdiff v1 v2 -c config.json -o report.md -H report.html 2> report.warnings
 ```
 
-Always capture stderr — warnings never appear in the report itself, and some of them
-change how much you should trust it:
+## Contents
 
-```bash
-python3 -m dirdiff v1 v2 -c config.json -o report.md 2> report.warnings
-```
-
-## Documentation
-
-| Document | For |
+| Section | |
 |---|---|
-| This file | Reference: every flag, config field, output format and limitation |
-| [`docs/UIUX-GUIDE.md`](docs/UIUX-GUIDE.md) | How to use it and how to read what it produces — the three flows, the visual language element by element, the config mistakes that produce a silently wrong report, and what each warning means for trusting the result |
-| [`CLAUDE.md`](CLAUDE.md) | Architecture, hard constraints and conventions for anyone changing the code |
+| [How it works](#how-it-works) | The pipeline, and what is deterministic versus what the model adds |
+| [Requirements](#requirements) | Two required, two optional |
+| [Getting it onto a closed network](#getting-it-onto-a-closed-network) | The transfer set: repo, image, OS packages |
+| [Usage](#usage) | Flags, exit codes, what goes where |
+| [Configuration](#configuration) | Rules, prompts, risk labels, normalizers, tuning |
+| [What you get](#what-you-get) | Markdown, HTML and JSON |
+| [Tests](#tests) · [Known limitations](#known-limitations) | |
 
-## What it does
+Two companion documents: [`docs/UIUX-GUIDE.md`](docs/UIUX-GUIDE.md) for how to read
+the report and the design rules behind it, and [`CLAUDE.md`](CLAUDE.md) for the
+architecture and constraints if you are changing the code.
 
-The pipeline runs in two stages.
+## How it works
 
-**Stage 1 — deterministic filtering (no model).**
-Both directories are copied to a temporary directory. Rules from the config file are
-applied to the copies: files not worth comparing are deleted, source files are
-normalized (comments stripped, formatting flattened), and generated lines are replaced
-with a fixed token on both sides. Then `git diff` runs on the normalized copies.
+**Stage 1 — deterministic. No model.**
 
-**Stage 2 — model analysis.**
-Only the files still differing after normalization are sent to the model, one at a
-time, followed by an executive summary built from all the per-file analyses. The
-result is a Markdown report.
+Both directories are copied to a temporary directory and the config's rules are
+applied to the copies: skipped files are deleted, source files are normalized
+(comments stripped, formatting flattened), and generated lines are replaced with a
+fixed token on both sides. Then `git diff` runs twice — once on the untouched
+originals, once on the normalized copies. **A file that differs in the first pass
+but not the second changed only in ways the rules were told to ignore.** That
+subtraction is the definition of "noise only"; there is no separate detector.
 
-That separation is the whole point: the model does not spend its context window on
-brace placement, and whoever reads the report does not have to filter it out by hand.
-
-### How files are classified
+Also deterministic: a **cross-reference** over the diffs, described below.
 
 | Classification | Meaning |
 |---|---|
-| added / deleted / modified / renamed | Real change — survived normalization, sent for analysis |
-| noise only | The file differs between directories, but is identical after normalization |
-| skipped | Matched a rule with `skip: true` — never compared at all |
+| added / deleted / modified / renamed | Real change — survived normalization |
+| noise only | Differs between the directories, identical after normalization |
+| skipped | Matched a `skip` rule — never compared |
+
+**Stage 2 — model analysis, in three passes.**
+
+A file read in isolation cannot be understood, so the model is not simply handed
+one diff at a time:
+
+| Pass | Sees | Calls |
+|---|---|---|
+| **0 — Orientation** | An inventory of the whole change: files, statuses, churn, definitions added and removed, and anything deleted while still referenced. **Not the diffs.** | 1 (skipped for a single file) |
+| **1 — Per file** | One file's diff, carrying the orientation brief so it is read in context | N |
+| **2 — Reconciliation** | The inventory *and* every per-file analysis, asked for cross-file connections and which earlier conclusions the whole change revises | 1 |
+
+**N + 2 calls** — one more than a naive per-file loop, regardless of drop size.
+Pass 0 is cheap because it never carries code: on the sample project the whole
+inventory is under 500 characters.
+
+That separation is the point: the model does not spend its context on brace
+placement, and the reader does not have to filter it out by hand.
 
 ### Cross-reference — computed, not guessed
 
-Alongside the diff, the tool answers one question the model is bad at and search
-is good at: **what did this change delete that something still uses?**
+Alongside the diff, the tool answers one question the model is bad at and search is
+good at: **what did this change delete that something still uses?**
 
 For every real change it extracts the definitions added and removed — function
 definitions with a body, and `#define`s — then searches the new tree for the
@@ -75,127 +79,42 @@ report:
 |---|---|
 | `legacy_calibrate` | `adc.c` |
 
-That example is the demo's: `legacy.c` was deleted while `adc.c` still calls it.
-A link error, found without a model, and reported before the reviewer reads a
-single diff.
+A link error, found without a model, reported before the reviewer opens a diff.
 
-It is deliberately conservative, and it is not a compiler:
+Deliberately conservative, and not a compiler:
 
-- Only two definition forms are recognised, and a function must carry a body — a
-  prototype moving between headers is not a change in what exists.
+- A function must carry a body. A prototype moving between headers is not a change
+  in what exists.
 - A symbol removed from one file and defined in another is a **move**, not a
-  removal, and is excluded. The demo's `calib.c` → `calibrate.c` rename produces
-  no findings, correctly.
-- Matching is whole-word, so `legacy_calibrate_v2` is not a reference to
+  removal, and is excluded.
+- Matching is whole-word: `legacy_calibrate_v2` is not a reference to
   `legacy_calibrate`.
-- It reads text; it does not parse C. A name inside a comment or a string counts
-  as a reference. **Verify each finding** — the report says so too.
+- It reads text, it does not parse C. A name in a comment or a string counts as a
+  reference. **Verify each finding** — the report says so too.
 
-This runs with `--no-llm`, like the rest of the comparison. The JSON carries both
-halves under `cross_reference`: `removed` (what went away) and `dangling` (what
-still names it).
-
-## Project layout
-
-```
-dirdiff/
-  __main__.py   entry point for `python3 -m dirdiff`
-  cli.py        argument parsing and wiring
-  compare.py    the two-diff pipeline and classification — the core algorithm
-  rules.py      the filter stage
-  gitdiff.py    what changed between two directories
-  llm.py        model analysis of the real changes
-  output.py     Markdown, HTML and JSON rendering
-  common.py     warning reporting
-config.json     example config
-tests/          unit tests, stdlib unittest only
-```
-
-Each module is designed around a small interface with the complexity behind it.
-The whole public surface of the package is:
-
-| Module | Public interface |
-|---|---|
-| `compare` | `compare(dir_a, dir_b, rules) -> Comparison` |
-| `gitdiff` | `changed_files(...)`, `diff_sections(...)` |
-| `rules` | `prepare_copy(...)`, `skipped_files(...)`, `is_binary(...)`, `IGNORED_TOKEN` |
-| `llm` | `analyze_changes(...)`, `http_chat(config)` |
-| `output` | `build_report(...)`, `build_html(...)`, `build_json(...)` |
-| `common` | `warn(message)` |
-
-Everything else is an underscore-prefixed internal. Notably, all of git's path
-quoting, prefix and separator handling lives inside `gitdiff` — callers only ever
-see plain relative paths.
-
-Dependencies run one way: `common` imports nothing from the package, `gitdiff` and
-`rules` depend only on it, `compare` builds on those, and `cli` wires everything
-together. There are no import cycles.
-
-### The chat seam
-
-`analyze_changes` does not build an HTTP client — it accepts one:
-
-```python
-chat(system, user, label) -> str | None
-```
-
-`http_chat(config)` is the real adapter, talking to the OpenAI-compatible endpoint
-and returning `None` on any failure. Tests pass a fake, which is what lets the entire
-analysis stage — file capping, hunk splitting, summary folding — be tested in-process
-with no server running. If you ever need a second backend, this is where it plugs in.
+Everything in this section works under `--no-llm`.
 
 ## Requirements
 
-| Component | Version | Required? | Note |
+| Component | Version | Required? | Used for |
 |---|---|---|---|
-| Python | 3.8+ | yes | Standard library only — **no pip dependencies** |
-| git | 2.30+ | yes | Needs `git diff --no-index` |
-| clang-format | any | optional | Formatting normalization for C/C++ |
-| gcc | any | optional | Powers `strip-comments` |
+| Python | 3.8+ | **yes** | Standard library only — no pip dependencies |
+| git | 2.30+ | **yes** | `git diff --no-index` is the comparison engine |
+| `clang-format` | any | no | Formatting normalization for C/C++ |
+| `gcc` | any | no | Powers `strip-comments` (preprocessor only, never a compile) |
 
-If `clang-format` or `gcc` is missing, the tool prints a warning to stderr and
-continues without it. The report is still produced — but formatting and comment
-changes will count as real changes, because nothing normalized them away.
+You need `clang-format`, **not** clang — a standalone binary (`apt install
+clang-format`, or `yum install clang-tools-extra`). Without the two optional tools
+the run still produces a report, but formatting and comment changes count as real
+changes, because nothing normalized them away.
 
-## Installing on an air-gapped network
+`git` is the one dependency with no graceful failure: missing, you get a Python
+traceback rather than a diagnostic. Check it first.
 
-The tool is designed to be copied, not installed. No `pip install`, no virtualenv, no
-packages to bring in from outside.
+## Getting it onto a closed network
 
-```bash
-# 1. Copy the package directory and the config onto the closed network:
-#    dirdiff/  (the whole directory)
-#    config.json
-
-# 2. Check the tool versions
-python3 --version    # needs 3.8+
-git --version        # needs 2.30+
-
-# 3. Confirm the package is intact — this must print the usage text
-python3 -m dirdiff --help
-
-# 4. Optional — the normalizers
-clang-format --version
-gcc --version
-```
-
-`dirdiff/` must be copied whole; the modules import each other and a partial copy
-fails at import time. Step 3 is the cheap way to catch that before you need the tool.
-
-If `clang-format` is missing and a local RPM repository is available:
-
-```bash
-sudo yum install clang-tools-extra   # provides clang-format
-sudo yum install gcc
-```
-
-If there is no repository, just remove `"clang-format"` and `"strip-comments"` from the
-`normalize` list in the config and rely on `ignore_lines` alone.
-
-## The transfer set — repo plus dependencies, one directory
-
-`airgap.sh` builds everything the closed network needs into `dist/`, checksums it,
-and imports it on the far side.
+`airgap.sh` builds everything the target needs into `dist/`, checksums it, and
+imports it on the far side.
 
 ```bash
 ./airgap.sh deps debian:12    # optional: the target distro's own .deb/.rpm packages
@@ -204,12 +123,12 @@ and imports it on the far side.
 
 | Artifact | What it solves | Size |
 |---|---|---|
-| `dirdiff.bundle` | The whole repository, **all history, one file**. Clone from it offline; bundle back out to return work | ~68 KB |
+| `dirdiff.bundle` | The whole repository, **all history, one file**. Clone offline; bundle back out to return work | ~70 KB |
 | `dirdiff-image.tar.gz` | A container carrying Python, git, clang-format and gcc — no package repository needed | a few hundred MB |
-| `deps/<distro>/` | The same four tools as native packages, with an `install.sh`, for a target with no Docker | varies |
+| `deps/<distro>/` | The same four tools as native packages with an `install.sh` | varies |
 | `SHA256SUMS`, `IMPORT.txt`, `airgap.sh` | Verification, instructions, and the importer itself | small |
 
-You rarely need all three. Pick by what the target already has:
+Carry only what the target lacks:
 
 | Target has | Carry |
 |---|---|
@@ -217,128 +136,108 @@ You rarely need all three. Pick by what the target already has:
 | Docker | bundle + image |
 | Neither | bundle + `deps/` |
 
-### Transfer
-
-Copy the whole `dist/` directory. **Then, on the far side:**
+**On the far side**, copy the whole `dist/` directory across, then:
 
 ```bash
 ./airgap.sh verify     # refuses to continue if the media corrupted anything
 ./airgap.sh import     # clones the repo, loads the image if one is present
-./airgap.sh selftest   # runs the 96-test suite HERE, and prints the tool versions
+./airgap.sh selftest   # runs the suite HERE, and prints the tool versions
 ```
 
 `selftest` is the step people skip and should not: it proves the tool runs on
-*that* box, not merely that the bytes arrived. It probes for a working Python
+*that* box, not merely that the bytes arrived. It probes for a working interpreter
 rather than trusting `PATH` — a `python3` that answers but does not run is a real
-thing, and it would otherwise let the suite silently pass by testing nothing.
+thing, and it would otherwise let the suite pass while testing nothing.
+
+The checksum catches **corruption, not tampering**: if `SHA256SUMS` rides the same
+media, anyone who alters a file can regenerate it. If tampering is in your threat
+model, carry the digest through a separate channel.
 
 ### Installing the dependencies natively
 
-`./airgap.sh deps <base-image>` downloads git, clang-format, gcc and python3 —
-with their transitive dependencies — from inside a container of the distro you
-name, so architecture and versions match the target. On the far side:
+`./airgap.sh deps <base-image>` downloads git, clang-format, gcc and python3 with
+their transitive dependencies, from inside a container of the distro you name, so
+architecture and versions match. On the far side, as root:
 
 ```bash
 sh deps/debian-12/install.sh --dry-run    # check nothing is missing
-sh deps/debian-12/install.sh              # as root
+sh deps/debian-12/install.sh
 ```
 
-**The resolution happens against that container's package state**, so name the
-image your target was installed from. `debian:12` packages will not install on
-Rocky 9, and a target more minimal than the image may still want a dependency the
-image already had — which is what `--dry-run` is for.
+**Resolution happens against that container's package state**, so name the image
+your target was installed from. `debian:12` packages will not install on Rocky 9,
+and a target more minimal than the image may still want a dependency the image
+already had — which is what `--dry-run` is for.
 
-### Sending work back out
+### Without any of that
 
-A bundle works in both directions. Commit on the closed network, then:
-
-```bash
-git bundle create outbound.bundle --all
-```
-
-Carry that file out and `git fetch outbound.bundle` on the connected side.
+The package is 253 KB of Python. Copying `dirdiff/`, `tests/` and `config.json` by
+hand works, and `dirdiff/` must land whole — the modules import each other, so a
+partial copy fails at import. Confirm with `python3 -m dirdiff --help` and
+`python3 -m unittest discover -s tests` before you need it.
 
 ### Running the container
 
 ```bash
 mkdir -p out
 docker run --rm --user "$(id -u):$(id -g)" \
-  -v "$PWD/v1:/work/v1:ro" \
-  -v "$PWD/v2:/work/v2:ro" \
-  -v "$PWD/config.json:/work/config.json:ro" \
-  -v "$PWD/out:/work/out" \
-  dirdiff v1 v2 -c config.json \
-    -o out/report.md -H out/report.html -j out/report.json \
+  -v "$PWD/v1:/work/v1:ro" -v "$PWD/v2:/work/v2:ro" \
+  -v "$PWD/config.json:/work/config.json:ro" -v "$PWD/out:/work/out" \
+  dirdiff v1 v2 -c config.json -o out/report.md -H out/report.html \
   2> out/report.warnings
 ```
 
-| Mount | Mode | Purpose |
-|---|:---:|---|
-| `/work/v1` | `ro` | Directory A — the old version |
-| `/work/v2` | `ro` | Directory B — the new version |
-| `/work/config.json` | `ro` | Rule and LLM config |
-| `/work/out` | `rw` | Where the reports are written |
+`WORKDIR` is `/work`; the package lives at `/opt/dirdiff`, outside it, so a mount
+cannot shadow it. Two things that will bite you if you skip them:
 
-`WORKDIR` is `/work`, so the arguments above are plain relative paths; absolute
-paths work equally well. The package itself lives at `/opt/dirdiff`, outside
-`/work`, so a mount cannot shadow it.
-
-### Two things that will bite you if you skip them
-
-**Pass `--user "$(id -u):$(id -g)"`.** Without it the container writes as root
-and the reports land on your host owned by root. The image sets no `USER` for
-exactly this reason: nothing inside needs a particular uid, so the caller
-chooses one and the output is owned by them.
-
-**Directory names become pane headers.** The two arguments are printed verbatim
-at the top of each side-by-side comparison, so mount them under short names —
-`v1` and `v2`, not a full absolute path.
-
-The image also runs `git config --system --add safe.directory '*'`. Bind mounts
-are owned by the host's uid, and without that setting git refuses to touch a
-tree it considers to have "dubious ownership", which fails the comparison before
-it starts.
-
-### The model endpoint
+- **Pass `--user "$(id -u):$(id -g)"`**, or the reports land owned by root. The
+  image sets no `USER` precisely so the caller can choose one.
+- **Mount under short names.** The two directory arguments are printed verbatim as
+  the side-by-side pane headers.
 
 `llm.base_url` must be reachable from **inside** the container, so `localhost`
-means the container itself. Use `host.docker.internal` on Docker Desktop, the
-host's LAN address elsewhere, or `--network host` on Linux. `--no-llm` skips
-model analysis entirely and still produces the full comparison.
+means the container itself. Use `host.docker.internal`, the host's LAN address, or
+`--network host` on Linux.
 
-### Reproducible builds
+### Sending work back out
 
-`FROM python:3.11-slim` is a moving tag. For a transfer artifact you may need to
-reproduce later, pin it by digest:
-
-```bash
-docker inspect --format '{{index .RepoDigests 0}}' python:3.11-slim
-```
-
-and replace the `FROM` line with the `python@sha256:...` value it prints.
+A bundle works in both directions. Commit on the closed network, then
+`git bundle create outbound.bundle --all`, carry it out, and `git fetch` from it.
 
 ## Usage
-
-Run it as a module, from the directory holding `dirdiff/`:
 
 ```bash
 python3 -m dirdiff DIR_A DIR_B -c config.json -o report.md
 python3 -m dirdiff DIR_A DIR_B -c config.json -o report.md --no-llm
-python3 -m dirdiff DIR_A DIR_B -c config.json -o report.md -H report.html
-python3 -m dirdiff DIR_A DIR_B -c config.json -o report.md -j report.json
+python3 -m dirdiff DIR_A DIR_B -c config.json -o report.md -H report.html -j report.json
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `DIR_A` | — | First directory (the old version) |
-| `DIR_B` | — | Second directory (the new version) |
-| `-c`, `--config` | `config.json` | Config file |
-| `-o`, `--output` | `report.md` | Report file to write |
+| `DIR_A` | — | The old version. Order is meaning: A is the left pane and the `-` side |
+| `DIR_B` | — | The new version |
+| `-c`, `--config` | `config.json` | Config file. Prompt paths resolve against **its** directory |
+| `-o`, `--output` | `report.md` | Markdown report — always produced |
 | `-H`, `--html` | off | Also write a self-contained HTML report |
-| `-j`, `--json` | off | Also write JSON output for automated consumers |
-| `--no-llm` | off | Produce the report without model analysis |
+| `-j`, `--json` | off | Also write JSON for automated consumers |
+| `--no-llm` | off | Skip model analysis; everything deterministic still runs |
 
-## Config file
+One line reaches stdout, on success only:
+
+```
+Report written to report.md — 7 real changes, 3 noise only, 1 skipped.
+```
+
+Everything else — every warning, every error — goes to stderr. **Capture it.**
+Warnings never appear in the report, and some change how much you should trust it.
+Exit codes: `0` written (even with warnings), `2` bad input or a failed write, `1`
+an uncaught exception.
+
+## Configuration
+
+Every input is declarable. Rules were always external; the prompts, the risk labels
+and the normalizer command lines now are too, so a reviewer can read and approve
+the exact text that leaves the box without reading Python.
 
 ```json
 {
@@ -364,206 +263,143 @@ python3 -m dirdiff DIR_A DIR_B -c config.json -o report.md -j report.json
 }
 ```
 
-### `llm` fields
+Every section below `llm` and `rules` is **optional** and defaults to the built-in
+values, so an existing config keeps working untouched.
 
-| Field | Meaning |
-|---|---|
-| `base_url` | OpenAI-compatible server address (vLLM, for example). Empty or missing → analysis is skipped |
-| `api_key` | Sent as `Authorization: Bearer`. May be left empty |
-| `model` | Model name as the server knows it |
-| `temperature`, `max_tokens` | Passed through to the request as-is |
-| `max_chars_per_call` | A diff longer than this is split on `@@` boundaries and analyzed in parts |
-| `max_files` | Cap on files analyzed. Beyond it, a warning is printed |
-| `timeout_sec` | Timeout for each HTTP call |
-
-### Rule fields
+### `rules` — the filter
 
 | Field | Type | Meaning |
 |---|---|---|
-| `match` | list of patterns | `fnmatch` patterns tested against the relative path **and** the basename |
-| `skip` | boolean | The file is deleted from both copies — never compared |
-| `normalize` | list of commands | Run in order, stdin to stdout, 60-second timeout |
-| `ignore_lines` | list of regexes | Every matching line is replaced with a fixed token on both sides |
+| `match` | list | `fnmatch` patterns tested against the relative path **and** the basename |
+| `skip` | bool | Deleted from both copies — never compared |
+| `normalize` | list | Commands run in order, stdin to stdout |
+| `ignore_lines` | list | Every matching line becomes a fixed token on both sides |
 
-**First matching rule wins.** Rules are tested in list order, so put specific rules
-before general ones.
+**First matching rule wins**, and there is no negation — order specific before
+general. A file matched by no rule is compared raw. Matching is case-insensitive on
+Windows and case-sensitive on Linux, because `fnmatch` normalises case.
 
-#### Built-in normalizer aliases
+Why `ignore_lines` rather than git's `-I`: `-I` is global, so you cannot ignore one
+regex in `.c` and a different one in `.json` in a single invocation. Substituting a
+token on both sides achieves per-type ignoring inside one `git diff`, and preserves
+line counts so numbering does not shift.
 
-| Alias | Actual command |
-|---|---|
-| `clang-format` | `clang-format -style=LLVM -assume-filename={name}` |
-| `strip-comments` | `gcc -fpreprocessed -dD -E -P -x c -` |
-| `json-sort` | Python: read JSON from stdin, write it back with `sort_keys=True` |
-
-Any other string is run as a shell command as-is. The substring `{name}` is replaced
-with the file's basename, **already quoted for the shell** — do not add quotes of your
-own. Filenames arrive from someone else's source tree, so an unquoted `{name}` would
-let a file called `x&mkdir OWNED&.c` run a command during the comparison. If a command
-exits non-zero, a warning is printed and the pre-normalization text is kept.
-
-#### Why `ignore_lines` and not `git diff -I`
-
-Git has an `-I` flag for ignoring lines by regex, but it is global: you cannot set one
-regex for `.c` files and a different one for `.json` files in the same invocation.
-Replacing those lines with a fixed token on both sides achieves per-file-type ignoring
-within a single `git diff` call, and preserves the line count so diff line numbers do
-not shift.
-
-## Report structure
-
-| Section | Content |
-|---|---|
-| Header | Both directories, date, and the counts: real / noise only / skipped |
-| `## Executive summary` | Overall summary and risk level — only if model analysis ran |
-| `## Files` | File and status for every changed file |
-| `## Changes` | For each real change: the model's analysis, then the normalized diff inside `<details>` |
-
-For each file the model is asked to return **Summary** (one sentence), **Changes**
-(bullets) and **Risk** (Low/Medium/High with justification). Binary files are detected
-by a NUL byte in the first 8KB, are not normalized, and get a one-line note instead of
-a diff.
-
-## HTML output — a report you can hand to a reviewer
-
-The `-H` flag writes the same report as a single HTML file. It is meant for the
-reviewer who is not reading Markdown in a terminal: counts as headline figures, a
-file table where noise and skipped rows are visually recessed, a risk badge wherever
-one could be extracted, and every change shown as a **side-by-side comparison**.
-
-### The side-by-side view
-
-Two panes, headed with the directory each belongs to, aligned row by row the way a
-dedicated comparison tool shows them:
-
-| Row | Meaning |
-|---|---|
-| Both sides filled, same text | Context — unchanged, with the line number each side has |
-| Both sides filled, coloured | An edited line, old on the left and new on the right, with **the characters that actually differ marked** |
-| One side blank | An insertion or a deletion; the blank half keeps the rows aligned |
-| `⋯` | A gap between hunks — lines that were skipped |
-
-Character-level marking is only applied when the two lines are actually related
-(similarity of 0.5 or better). Below that they are unrelated, and marking every
-differing character would light up the whole row instead of informing.
-
-Both panes live in one table, so they cannot drift out of alignment, and the line
-numbers on each side are independent — after an insertion the left pane keeps its
-own numbering, which is what lets you see how far the two files have diverged.
-
-**Hovering a line highlights its counterpart on the other side.** Corresponding
-lines share a table row, so the pairing is structural and one CSS rule lights both
-panes at once — there is no JavaScript in the report, and nothing to fall out of sync.
-Hovering an inserted or deleted line highlights the blank half opposite it, which is
-how the view says "this line has no counterpart". Being hover-based, it is a
-pointer-only affordance; the colouring and line numbers carry the same information
-without it.
-
-Markdown and JSON keep the unified diff: side-by-side needs real columns, and the
-JSON `diff` field stays the format an automated consumer already parses.
-
-```bash
-python3 -m dirdiff v1 v2 -c config.json -o report.md -H report.html
-```
-
-**The file is entirely self-contained** — styles are inlined and nothing is fetched
-at render time. That is a hard requirement, not a preference: on a closed network a
-report that reaches for a CDN renders unstyled. It also means the file can be copied
-off the box, or opened straight from a `file://` path, with no server involved.
-
-The page follows the reader's light or dark preference. There is no JavaScript in it;
-the comparisons sit in `<details>` elements, **expanded by default** in the HTML and
-collapsed in the Markdown — so a large drop reads as one scroll in the browser and as a
-summary in the terminal.
-
-Everything in the HTML comes from the same `Comparison` the Markdown is built from, so
-the two never disagree. The risk badge is the regex-extracted level described below,
-and it is simply absent when no level could be extracted — it is never guessed.
-
-## JSON output — wiring into an automated pipeline
-
-The `-j` flag writes a JSON file alongside the report, intended for an agent, a CI job,
-or a review bot. The Markdown report is unchanged — the JSON is an addition, not a
-replacement.
+### `prompts` — what the model is told
 
 ```json
-{
-  "schema_version": 1,
-  "generated_at": "2026-08-09T21:40:00",
-  "dir_a": "src/v1",
-  "dir_b": "src/v2",
-  "llm_ran": true,
-  "counts": { "real": 1, "noise": 2, "skipped": 1 },
-  "summary": {
-    "text": "full executive summary text...",
-    "risk": "medium"
-  },
-  "real": [
-    {
-      "file": "sensor.c",
-      "status": "M",
-      "binary": false,
-      "risk": "medium",
-      "analysis": "full per-file analysis text...",
-      "diff": "diff --git a/sensor.c b/sensor.c\n..."
-    }
-  ],
-  "noise": ["limits.json", "util.h"],
-  "skipped": ["build.log"]
+"prompts": {
+  "orient_system":  "@prompts/orient.md",
+  "file_system":    "@prompts/review-file.md",
+  "summary_system": "@prompts/summarize.md",
+  "file_user":      "{context}File: {path}\n\n```diff\n{diff}```"
 }
 ```
 
-| Field | Meaning |
+An `@` prefix means "read this file", resolved against the config's directory, so
+prose stays reviewable Markdown instead of JSON escapes.
+
+| Key | Placeholders (required in bold) |
 |---|---|
-| `schema_version` | Structure version. Bumped on a breaking change |
-| `llm_ran` | Whether any analysis came back from the model |
-| `counts` | The same counts shown in the report header |
-| `real[].status` | Git status letter: `A` / `D` / `M` / `R` |
-| `real[].analysis` | Full analysis text, or `null` if the model did not run or failed |
-| `real[].diff` | The file's normalized diff section |
-| `noise`, `skipped` | Filename lists only |
+| `orient_system` | none |
+| `orient_user` | **`{manifest}`** |
+| `file_system` | none |
+| `file_user` | **`{diff}`**, `{path}`, `{context}` |
+| `part_user` | **`{diff}`**, `{path}`, `{context}`, `{part}`, `{parts}` |
+| `context_block` | **`{brief}`** — how pass 0's output is introduced to pass 1 |
+| `summary_system` | none |
+| `summary_user` | **`{analyses}`**, `{manifest}` |
+| `summary_item` | **`{analysis}`**, `{path}` |
 
-### About the risk field
+Placeholders are validated at load: an unknown one, a missing required one, or a
+typo'd key is a startup error with exit 2 — never a silently mangled prompt.
 
-The risk level comes back from the model as free-form prose, so it is **extracted with
-a regular expression** from the `**Risk**` line (and, for the summary, the
-`**Overall risk**` line). Values are `low`, `medium`, `high`, or `null`.
+### `risk` — the labels extraction looks for
 
-Extraction is best effort:
+```json
+"risk": { "file_label": "Risk", "summary_label": "Overall risk" }
+```
 
-- `risk` is `null` whenever no level can be extracted — the model did not run, the call
-  failed, or the answer was phrased differently. **An automated consumer must handle
-  `null`** and must not assume a level is always present.
-- A line naming all three levels is rejected, to guard against the model echoing the
-  template back.
-- When a diff was split into parts, the most severe level across the parts wins.
+**These must move with the prompts.** The extractor looks for the literal label the
+prompt asks the model to write, so translating a prompt without changing the label
+makes every risk badge silently disappear. They are one coupled input, which is why
+they sit together.
 
-If you do not trust the extraction, ignore the risk field and parse `analysis`
-yourself — the full text is always there.
+### `normalizers` and `tuning`
+
+```json
+"normalizers": { "clang-format": "clang-format -style=LLVM -assume-filename={name}" },
+"tuning": { "normalize_timeout_sec": 60, "ignored_token": "<<ignored-by-rule>>" }
+```
+
+Built-in aliases are `clang-format`, `strip-comments` (`gcc -fpreprocessed -dD -E -P
+-x c -`) and `json-sort` (the running interpreter, so it needs nothing on `PATH`).
+Any other string is run as a shell command as written. `{name}` is substituted with
+the basename **already quoted for the shell** — do not add quotes of your own.
+Filenames come from someone else's tree, and an unquoted `{name}` would let a file
+called `x&mkdir OWNED&.c` run a command during the comparison.
+
+Still compiled in, deliberately: the three lines of diff context, rename detection,
+and the 0.5 similarity floor for character-level marking. Say the word if you want
+them declarable too.
+
+## What you get
+
+| Output | Audience | Notes |
+|---|---|---|
+| `-o` Markdown | You, a ticket, a terminal | Unified diff, disclosures collapsed |
+| `-H` HTML | A human reviewer, offline | Self-contained, side-by-side, no JavaScript |
+| `-j` JSON | Agents, CI, review bots | `schema_version: 1` |
+
+The report opens with the whole-change brief, the executive summary, and any
+cross-reference findings — then the file table, then each change.
+
+The HTML renders diffs **side by side with line matching**: two panes headed with
+the directory each belongs to, an edited line carrying old and new on one row with
+only the differing characters marked, insertions and deletions leaving the opposite
+pane blank, and `⋯` where hunks were skipped. Hovering either side highlights its
+counterpart, because corresponding lines share a table row — no script involved.
+See [`docs/UIUX-GUIDE.md`](docs/UIUX-GUIDE.md) for the full visual language.
+
+The JSON carries `brief`, `summary`, `counts`, `cross_reference` (`removed` and
+`dangling`), `inputs.prompts_sha256` — a fingerprint of the exact prompt set used,
+so a report is traceable to what produced it — and per-file `risk`, `analysis` and
+`diff`.
+
+**`risk` and `analysis` are genuinely nullable.** Binaries are never analysed, a
+dead endpoint yields nothing, and files past `max_files` get no prose. Combined
+with `llm_ran`, that is the branch an automated consumer must handle. The risk
+level is regex-extracted from prose and is `null` whenever no level can be
+extracted — it never means Low.
 
 ## Tests
-
-Unit tests covering the pure logic — rule matching, line ignoring, path handling,
-diff splitting, risk extraction, and Markdown, HTML and JSON rendering (including
-HTML escaping of diffs and filenames). No git, normalizers or network needed.
 
 ```bash
 python3 -m unittest discover -s tests
 ```
 
+139 tests over the pure logic — rule matching, line ignoring, path handling, diff
+splitting and alignment, symbol extraction and cross-referencing, settings
+validation, the three-pass call sequence, risk extraction, and Markdown, HTML and
+JSON rendering including HTML escaping. No git, no normalizers, no network.
+
 ## Known limitations
 
 - **Diff line numbers refer to the normalized files**, not the originals. After
-  `strip-comments` and `clang-format` the numbering shifts. Use the diff to understand
-  the change, not to navigate the original file.
-- **First matching rule wins, and there is no negation.** You cannot express "all `.c`
-  files except `generated_*.c`". The workaround is to put a more specific rule first.
-- **Files that are not valid UTF-8 are compared un-normalized.** Legacy sources with
-  cp1252 comments or strings are left byte-for-byte, warned about on stderr, and
-  compared as they are — so formatting and comment changes in them count as real
-  changes. Normalizing them would mean decoding lossily, which can make two files
-  that genuinely differ look identical, and a real change would vanish into "noise".
-- A failed model call does not stop the run — a warning goes to stderr and the report is
-  produced without that analysis.
-- Skipped files are never compared, so the report cannot tell you **what** changed in
-  them.
+  comment-stripping and reformatting the numbering shifts and the text differs. Use
+  the diff to understand the change; find it in the original by symbol name.
+- **"Noise only" is asserted without evidence.** The report does not show what
+  changed in a file it filtered, so the verdict cannot be audited from the report
+  alone. Skipped files are disclosed as a blind spot; this one is the same and
+  deserves the same treatment.
+- **A degraded run looks like a clean one.** Warnings go only to stderr and the exit
+  code is 0 either way. Capture stderr and keep it with the report.
+- **First matching rule wins, and there is no negation.** You cannot express "all
+  `.c` except `generated_*.c`"; put the specific rule first.
+- **Files that are not valid UTF-8 are compared un-normalized** and warned about, so
+  their formatting changes count as real. Decoding them lossily could make two
+  genuinely different files look identical, which is the worse failure.
+- **The cross-reference reads text, not C.** A name in a comment counts as a
+  reference.
+- A failed model call does not stop the run — a warning goes to stderr and the
+  report is produced without that analysis.
+- Skipped files are never compared, so the report cannot say what changed in them.

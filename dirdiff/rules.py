@@ -60,13 +60,17 @@ def skipped_files(rules, paths):
     return result
 
 
-def prepare_copy(src, dst, rules):
+def prepare_copy(src, dst, rules, settings=None):
     """Copy a directory to dst and apply the rules to the copy.
 
     Skipped files are deleted, binaries are left untouched, and everything else is
     normalized then line-filtered. Failures degrade: a missing normalizer or a
     failing command warns and leaves the text as it was.
+
+    `settings` supplies the normalizer command lines and the tuning values; the
+    built-in defaults are used when it is absent.
     """
+    aliases, timeout, token = _from_settings(settings)
     shutil.copytree(src, dst)
     for root, _dirs, files in os.walk(dst):
         for name in files:
@@ -98,8 +102,8 @@ def prepare_copy(src, dst, rules):
                 warn("cannot read %s: %s" % (rel, exc))
                 continue
             for step in steps:
-                text = _normalize_text(step, text, os.path.basename(rel), rel)
-            text = _apply_ignore_lines(text, patterns)
+                text = _normalize_text(step, text, os.path.basename(rel), rel, aliases, timeout)
+            text = _apply_ignore_lines(text, patterns, token)
             try:
                 with open(path, "w", encoding="utf-8", newline="") as handle:
                     handle.write(text)
@@ -110,6 +114,17 @@ def prepare_copy(src, dst, rules):
 
 
 # --- internals ---------------------------------------------------------------
+
+
+def _from_settings(settings):
+    """(aliases, timeout, token), falling back to the built-in defaults."""
+    if settings is None:
+        return _ALIASES, 60, IGNORED_TOKEN
+    return (
+        settings.normalizers,
+        settings.tuning["normalize_timeout_sec"],
+        settings.tuning["ignored_token"],
+    )
 
 
 def _matching_rule(rules, rel):
@@ -150,18 +165,19 @@ def _quote_name(name):
     return shlex.quote(name)
 
 
-def _command_for(step, name):
+def _command_for(step, name, aliases=None):
     """Resolve an alias and substitute {name}, quoted. The rest is run as written."""
-    return _ALIASES.get(step, step).replace("{name}", _quote_name(name))
+    table = _ALIASES if aliases is None else aliases
+    return table.get(step, step).replace("{name}", _quote_name(name))
 
 
-def _normalize_text(step, text, name, rel):
+def _normalize_text(step, text, name, rel, aliases=None, timeout=60):
     """Run one normalization step (stdin to stdout). On any failure, return the input.
 
     A missing binary is warned about once per tool, then skipped for the rest of
     the run — an air-gapped box without clang-format should still get a report.
     """
-    command = _command_for(step, name)
+    command = _command_for(step, name, aliases)
     program = _program_of(command)
     if program in _missing_tools:
         return text
@@ -181,10 +197,13 @@ def _normalize_text(step, text, name, rel):
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=60,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        warn("normalize step '%s' exceeded 60s for %s — keeping the original text." % (step, rel))
+        warn(
+            "normalize step '%s' exceeded %ds for %s — keeping the original text."
+            % (step, timeout, rel)
+        )
         return text
     if proc.returncode != 0:
         detail = (proc.stderr or "").strip().split("\n")[0]
@@ -196,7 +215,7 @@ def _normalize_text(step, text, name, rel):
     return proc.stdout
 
 
-def _apply_ignore_lines(text, patterns):
+def _apply_ignore_lines(text, patterns, token=IGNORED_TOKEN):
     """Replace every matching line with a fixed token, preserving the line count.
 
     Keeping the count stable means diff line numbers do not shift, and applying
@@ -209,5 +228,5 @@ def _apply_ignore_lines(text, patterns):
     lines = text.split("\n")
     for index, line in enumerate(lines):
         if any(regex.search(line) for regex in regexes):
-            lines[index] = IGNORED_TOKEN
+            lines[index] = token
     return "\n".join(lines)

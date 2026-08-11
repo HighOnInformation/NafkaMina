@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dirdiff.compare import Comparison, _noise
 from dirdiff.gitdiff import _parse_name_status, _relativize, _split_sections, _unquote
-from dirdiff.llm import analyze_changes
+from dirdiff.llm import _manifest, analyze_changes
 from dirdiff.output import (
     _extract_risk,
     _mark_pair,
@@ -30,6 +30,7 @@ from dirdiff.output import (
     build_json,
     build_report,
 )
+from dirdiff.settings import load as load_settings
 from dirdiff.symbols import CrossReference as CrossRef
 from dirdiff.symbols import _definitions, cross_reference
 from dirdiff.rules import (
@@ -166,6 +167,22 @@ class PrepareCopy(unittest.TestCase):
         os.chmod(copied, stat.S_IWRITE)
         self.assertTrue(os.path.isfile(copied))
 
+    def test_a_configured_normalizer_alias_is_used(self):
+        settings = load_settings({"normalizers": {"clang-format": "no-such-tool-xyz {name}"}}, ".")
+        self._write("a.c", b"int a;\n")
+        # The tool does not exist, so the step is skipped with a warning naming it.
+        prepare_copy(self.src, self.dst, [{"match": ["*.c"], "normalize": ["clang-format"]}],
+                     settings=settings)
+        self.assertTrue(os.path.isfile(os.path.join(self.dst, "a.c")))
+
+    def test_a_configured_ignored_token_is_used(self):
+        settings = load_settings({"tuning": {"ignored_token": "<<GONE>>"}}, ".")
+        self._write("v.h", b"#define BUILD_NUMBER 7\nint a;\n")
+        prepare_copy(self.src, self.dst, [{"match": ["*.h"], "ignore_lines": [r"^#define BUILD"]}],
+                     settings=settings)
+        with open(os.path.join(self.dst, "v.h"), "r", encoding="utf-8") as handle:
+            self.assertEqual(handle.read().split("\n")[0], "<<GONE>>")
+
     def test_ignore_lines_still_applied_to_a_normal_file(self):
         self._write("v.h", b"#define BUILD_NUMBER 7\nint a;\n")
         prepare_copy(self.src, self.dst, [{"match": ["*.h"], "ignore_lines": [r"^#define BUILD"]}])
@@ -179,6 +196,74 @@ class ProgramOf(unittest.TestCase):
 
     def test_quoted_path_with_spaces(self):
         self.assertEqual(_program_of('"C:/Program Files/py.exe" -c "x"'), "C:/Program Files/py.exe")
+
+
+# --- settings ----------------------------------------------------------------
+
+
+class LoadSettings(unittest.TestCase):
+    """Every word sent to the model must be declarable in the config."""
+
+    def setUp(self):
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+
+    def test_an_empty_config_yields_the_built_in_defaults(self):
+        settings = load_settings({}, self.work)
+        self.assertIn("senior software engineer", settings.prompts["file_system"])
+        self.assertEqual(settings.risk["file_label"], "Risk")
+        self.assertIn("clang-format", settings.normalizers)
+        self.assertEqual(settings.tuning["normalize_timeout_sec"], 60)
+
+    def test_a_prompt_can_be_overridden_inline(self):
+        settings = load_settings({"prompts": {"file_system": "be brief"}}, self.work)
+        self.assertEqual(settings.prompts["file_system"], "be brief")
+        # untouched keys keep their defaults
+        self.assertIn("{diff}", settings.prompts["file_user"])
+
+    def test_an_at_prefix_reads_the_prompt_from_a_file(self):
+        path = os.path.join(self.work, "review.md")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("prompt from a file\n")
+        settings = load_settings({"prompts": {"file_system": "@review.md"}}, self.work)
+        self.assertEqual(settings.prompts["file_system"], "prompt from a file")
+
+    def test_a_missing_prompt_file_is_a_loud_error(self):
+        with self.assertRaises(ValueError) as caught:
+            load_settings({"prompts": {"file_system": "@nope.md"}}, self.work)
+        self.assertIn("nope.md", str(caught.exception))
+
+    def test_an_unknown_placeholder_is_rejected(self):
+        with self.assertRaises(ValueError) as caught:
+            load_settings({"prompts": {"file_user": "{path} {banana}"}}, self.work)
+        self.assertIn("banana", str(caught.exception))
+
+    def test_a_missing_required_placeholder_is_rejected(self):
+        with self.assertRaises(ValueError) as caught:
+            load_settings({"prompts": {"file_user": "no diff here"}}, self.work)
+        self.assertIn("{diff}", str(caught.exception))
+
+    def test_an_unknown_prompt_key_is_rejected(self):
+        # A typo'd key would otherwise be a silent no-op.
+        with self.assertRaises(ValueError) as caught:
+            load_settings({"prompts": {"file_systm": "oops"}}, self.work)
+        self.assertIn("file_systm", str(caught.exception))
+
+    def test_the_risk_label_can_move_with_the_prompt(self):
+        settings = load_settings({"risk": {"file_label": "Severity"}}, self.work)
+        self.assertEqual(settings.risk["file_label"], "Severity")
+        self.assertEqual(settings.risk["summary_label"], "Overall risk")
+
+    def test_a_normalizer_alias_can_be_replaced(self):
+        settings = load_settings({"normalizers": {"clang-format": "my-fmt {name}"}}, self.work)
+        self.assertEqual(settings.normalizers["clang-format"], "my-fmt {name}")
+        self.assertIn("strip-comments", settings.normalizers)
+
+    def test_prompts_have_a_digest_for_provenance(self):
+        one = load_settings({}, self.work)
+        two = load_settings({"prompts": {"file_system": "different"}}, self.work)
+        self.assertEqual(len(one.digest), 64)
+        self.assertNotEqual(one.digest, two.digest)
 
 
 # --- symbols -----------------------------------------------------------------
@@ -287,6 +372,11 @@ class CrossReferenceRendering(unittest.TestCase):
     def test_markdown_says_nothing_when_there_is_nothing_to_say(self):
         md = build_report("v1", "v2", comparison(), {}, None, xref=self.empty)
         self.assertNotIn("still referenced", md.lower())
+
+    def test_json_records_the_prompt_digest(self):
+        settings = load_settings({}, ".")
+        payload = build_json("v1", "v2", comparison(), {}, None, settings=settings)
+        self.assertEqual(payload["inputs"]["prompts_sha256"], settings.digest)
 
     def test_html_reports_a_dangling_symbol(self):
         html = build_html("v1", "v2", comparison(), {}, None, xref=self.xref)
@@ -435,35 +525,93 @@ class SplitSections(unittest.TestCase):
 # --- llm ---------------------------------------------------------------------
 
 
+class Manifest(unittest.TestCase):
+    """Pass 0 sees an inventory of the whole change, never the code."""
+
+    def test_lists_every_analysed_file_with_its_status(self):
+        real = {"a.c": ("M", ["a.c"]), "b.c": ("A", ["b.c"])}
+        text = _manifest(comparison(real=real), None, ["a.c", "b.c"])
+        self.assertIn("a.c", text)
+        self.assertIn("b.c", text)
+        self.assertIn("modified", text)
+        self.assertIn("added", text)
+
+    def test_carries_the_counts(self):
+        text = _manifest(comparison(noise={"u.h"}, skipped={"b.log"}), None, ["sensor.c"])
+        self.assertIn("1 real", text)
+        self.assertIn("1 noise", text)
+        self.assertIn("1 skipped", text)
+
+    def test_carries_the_dangling_findings(self):
+        xref = CrossRef(removed={"legacy.c": ["legacy_calibrate"]},
+                        dangling={"legacy_calibrate": ["adc.c"]})
+        text = _manifest(comparison(), xref, ["sensor.c"])
+        self.assertIn("legacy_calibrate", text)
+        self.assertIn("adc.c", text)
+
+    def test_never_contains_the_diffs(self):
+        # The whole point of pass 0 is that it is cheap.
+        text = _manifest(comparison(), None, ["sensor.c"])
+        self.assertNotIn("```diff", text)
+        self.assertNotIn("+y", text)
+
+
 class AnalyzeChanges(unittest.TestCase):
     """The chat seam makes the whole analysis stage testable without a server."""
 
-    def test_one_call_per_file_plus_a_summary(self):
+    def test_orientation_then_one_call_per_file_then_a_summary(self):
         chat = FakeChat()
         real = {"a.c": ("M", ["a.c"]), "b.c": ("M", ["b.c"])}
-        analyses, summary = analyze_changes(comparison(real=real), chat)
-        self.assertEqual(sorted(analyses), ["a.c", "b.c"])
-        self.assertIsNotNone(summary)
-        self.assertEqual(chat.labels, ["a.c", "b.c", "executive summary"])
+        result = analyze_changes(comparison(real=real), chat)
+        self.assertEqual(sorted(result.analyses), ["a.c", "b.c"])
+        self.assertIsNotNone(result.summary)
+        self.assertIsNotNone(result.brief)
+        self.assertEqual(chat.labels, ["orientation", "a.c", "b.c", "executive summary"])
+
+    def test_the_brief_is_given_to_every_file_call(self):
+        chat = FakeChat(reply="THE-BRIEF")
+        real = {"a.c": ("M", ["a.c"]), "b.c": ("M", ["b.c"])}
+        analyze_changes(comparison(real=real), chat)
+        for call in chat.calls[1:-1]:
+            self.assertIn("THE-BRIEF", call["user"])
+
+    def test_a_single_file_skips_orientation(self):
+        # One file has no "whole" to orient against; the call would be waste.
+        chat = FakeChat()
+        analyze_changes(comparison(), chat)
+        self.assertEqual(chat.labels, ["sensor.c", "executive summary"])
+
+    def test_a_failed_orientation_does_not_stop_the_run(self):
+        chat = FakeChat(reply=lambda n: None if n == 1 else "**Risk** — Low, ok.")
+        real = {"a.c": ("M", ["a.c"]), "b.c": ("M", ["b.c"])}
+        result = analyze_changes(comparison(real=real), chat)
+        self.assertIsNone(result.brief)
+        self.assertEqual(sorted(result.analyses), ["a.c", "b.c"])
+
+    def test_the_summary_sees_the_manifest_as_well_as_the_analyses(self):
+        chat = FakeChat()
+        real = {"a.c": ("M", ["a.c"]), "b.c": ("M", ["b.c"])}
+        analyze_changes(comparison(real=real), chat)
+        self.assertIn("2 real", chat.calls[-1]["user"])
 
     def test_binaries_are_never_sent(self):
         chat = FakeChat()
         real = {"a.c": ("M", ["a.c"]), "logo.png": ("M", ["logo.png"])}
-        analyses, _ = analyze_changes(comparison(real=real, binaries={"logo.png"}), chat)
-        self.assertEqual(list(analyses), ["a.c"])
+        result = analyze_changes(comparison(real=real, binaries={"logo.png"}), chat)
+        self.assertEqual(list(result.analyses), ["a.c"])
         self.assertNotIn("logo.png", chat.labels)
 
     def test_max_files_caps_the_work(self):
         chat = FakeChat()
         real = {"%d.c" % i: ("M", []) for i in range(5)}
-        analyses, _ = analyze_changes(comparison(real=real), chat, max_files=2)
-        self.assertEqual(len(analyses), 2)
+        result = analyze_changes(comparison(real=real), chat, max_files=2)
+        self.assertEqual(len(result.analyses), 2)
 
     def test_failed_calls_produce_no_summary(self):
         chat = FakeChat(reply=None)
-        analyses, summary = analyze_changes(comparison(), chat)
-        self.assertEqual(analyses, {})
-        self.assertIsNone(summary)
+        result = analyze_changes(comparison(), chat)
+        self.assertEqual(result.analyses, {})
+        self.assertIsNone(result.summary)
         self.assertNotIn("executive summary", chat.labels)
 
     def test_long_diff_is_split_into_parts(self):
@@ -471,17 +619,23 @@ class AnalyzeChanges(unittest.TestCase):
             "@@ -%d +%d @@\n-%s\n+%s\n" % (i, i, "x" * 40, "y" * 40) for i in range(6)
         )
         chat = FakeChat()
-        analyses, _ = analyze_changes(
+        result = analyze_changes(
             comparison(real={"f.c": ("M", [])}, sections={"f.c": big}), chat, max_chars=200
         )
         part_labels = [label for label in chat.labels if "part" in label]
         self.assertGreater(len(part_labels), 1)
-        self.assertIn("#### Part 1 of", analyses["f.c"])
+        self.assertIn("#### Part 1 of", result.analyses["f.c"])
 
     def test_missing_section_is_skipped(self):
         chat = FakeChat()
-        analyses, _ = analyze_changes(comparison(real={"a.c": ("M", [])}, sections={}), chat)
-        self.assertEqual(analyses, {})
+        result = analyze_changes(comparison(real={"a.c": ("M", [])}, sections={}), chat)
+        self.assertEqual(result.analyses, {})
+
+    def test_prompts_are_taken_from_settings(self):
+        chat = FakeChat()
+        prompts = load_settings({"prompts": {"file_system": "MY-OWN-PROMPT"}}, ".").prompts
+        analyze_changes(comparison(), chat, prompts=prompts)
+        self.assertEqual(chat.calls[0]["system"], "MY-OWN-PROMPT")
 
 
 # --- output ------------------------------------------------------------------
@@ -552,6 +706,16 @@ class BuildReport(unittest.TestCase):
         self.assertIn("## Executive summary", md)
         self.assertIn("the analysis", md)
         self.assertIn("<details><summary>Show diff</summary>", md)
+
+    def test_the_orientation_brief_is_rendered(self):
+        md = build_report("v1", "v2", comparison(), {}, None, brief="what this change is about")
+        self.assertIn("what this change is about", md)
+
+    def test_a_configured_risk_label_is_extracted(self):
+        risk = load_settings({"risk": {"file_label": "Severity"}}, ".").risk
+        md = build_report("v1", "v2", comparison(), {"sensor.c": "**Severity** — High, bad."},
+                          None, risk=risk)
+        self.assertIn("High, bad.", md)
 
     def test_no_summary_section_without_llm(self):
         self.assertNotIn("## Executive summary", build_report("v1", "v2", comparison(), {}, None))

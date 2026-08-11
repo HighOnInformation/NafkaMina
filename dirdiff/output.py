@@ -172,8 +172,17 @@ def _xref_parts(xref):
     return dict(xref.removed), dict(xref.dangling)
 
 
-def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None):
+def _labels(risk):
+    """The labels extraction looks for — configurable, because the prompt is."""
+    if not risk:
+        return "Risk", "Overall risk"
+    return risk.get("file_label", "Risk"), risk.get("summary_label", "Overall risk")
+
+
+def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=None,
+               risk=None, settings=None):
     """Machine-readable output for the rest of the pipeline (agent, CI, review bot)."""
+    file_label, summary_label = _labels(risk)
     files = []
     for rel in sorted(comparison.real):
         analysis = analyses.get(rel)
@@ -182,7 +191,7 @@ def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None):
                 "file": rel,
                 "status": comparison.real[rel][0],
                 "binary": rel in comparison.binaries,
-                "risk": _extract_risk(analysis, "Risk"),
+                "risk": _extract_risk(analysis, file_label),
                 "analysis": analysis,
                 "diff": comparison.sections.get(rel),
             }
@@ -198,18 +207,21 @@ def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None):
             "noise": len(comparison.noise),
             "skipped": len(comparison.skipped),
         },
-        "summary": {"text": summary, "risk": _extract_risk(summary, "Overall risk")},
+        "brief": brief,
+        "summary": {"text": summary, "risk": _extract_risk(summary, summary_label)},
         "cross_reference": dict(zip(("removed", "dangling"), _xref_parts(xref))),
+        "inputs": {"prompts_sha256": settings.digest if settings else None},
         "real": files,
         "noise": sorted(comparison.noise),
         "skipped": sorted(comparison.skipped),
     }
 
 
-def build_report(dir_a, dir_b, comparison, analyses, summary, xref=None):
+def build_report(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=None, risk=None):
     """Render the Markdown report."""
     real, noise, skipped = comparison.real, comparison.noise, comparison.skipped
     _, dangling = _xref_parts(xref)
+    file_label, summary_label = _labels(risk)
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     out = []
     out.append("# Directory comparison report\n")
@@ -222,6 +234,11 @@ def build_report(dir_a, dir_b, comparison, analyses, summary, xref=None):
     out.append("| Noise only | %d |" % len(noise))
     out.append("| Skipped | %d |" % len(skipped))
     out.append("")
+
+    if brief:
+        out.append("## The change as a whole\n")
+        out.append(brief)
+        out.append("")
 
     if summary:
         out.append("## Executive summary\n")
@@ -277,10 +294,11 @@ def build_report(dir_a, dir_b, comparison, analyses, summary, xref=None):
     return "\n".join(out)
 
 
-def build_html(dir_a, dir_b, comparison, analyses, summary, xref=None):
+def build_html(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=None, risk=None):
     """Render the report as one self-contained HTML file."""
     real, noise, skipped = comparison.real, comparison.noise, comparison.skipped
     _, dangling = _xref_parts(xref)
+    file_label, summary_label = _labels(risk)
     out = ["<!doctype html>", '<html lang="en">', "<head>", '<meta charset="utf-8">']
     out.append('<meta name="viewport" content="width=device-width,initial-scale=1">')
     out.append("<title>Directory comparison — %s / %s</title>" % (escape(dir_a), escape(dir_b)))
@@ -313,10 +331,14 @@ def build_html(dir_a, dir_b, comparison, analyses, summary, xref=None):
         )
     out.append("</div>")
 
+    if brief:
+        out.append('<section id="brief"><h2>The change as a whole</h2>')
+        out.append('<div class="panel prose">%s</div></section>' % _html_prose(brief))
+
     if summary:
         out.append('<section id="summary"><h2>Executive summary</h2>')
         out.append('<div class="panel prose">')
-        badge = _risk_badge(summary, "Overall risk")
+        badge = _risk_badge(summary, summary_label)
         if badge:
             out.append("<p>%s</p>" % badge)
         out.append(_html_prose(summary))
@@ -354,7 +376,7 @@ def build_html(dir_a, dir_b, comparison, analyses, summary, xref=None):
     else:
         out.append('<div class="changes">')
         for rel in sorted(real):
-            out.append(_change_block(rel, comparison, analyses, real, dir_a, dir_b))
+            out.append(_change_block(rel, comparison, analyses, real, dir_a, dir_b, file_label))
         out.append("</div>")
     out.append("</section>")
 
@@ -376,11 +398,11 @@ def _file_row(rel, status, is_real=False):
     )
 
 
-def _change_block(rel, comparison, analyses, real, dir_a, dir_b):
+def _change_block(rel, comparison, analyses, real, dir_a, dir_b, file_label="Risk"):
     status = _STATUS_LABELS.get(real[rel][0], real[rel][0])
     parts = ['<article class="change" id="file-%s">' % escape(rel)]
     heading = ["<h3><code>%s</code>" % escape(rel), '<span class="chip">%s</span>' % escape(status)]
-    badge = _risk_badge(analyses.get(rel), "Risk")
+    badge = _risk_badge(analyses.get(rel), file_label)
     if badge:
         heading.append(badge)
     parts.append("".join(heading) + "</h3>")

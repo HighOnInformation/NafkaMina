@@ -19,7 +19,7 @@ from .rules import is_binary, prepare_copy, skipped_files
 Comparison = collections.namedtuple("Comparison", "real noise skipped sections binaries")
 
 
-def compare(dir_a, dir_b, rules):
+def compare(dir_a, dir_b, rules, settings=None):
     """Run both diffs and classify every changed file.
 
     Returns a Comparison where:
@@ -35,8 +35,8 @@ def compare(dir_a, dir_b, rules):
     raw = changed_files(dir_a, dir_b)
 
     with tempfile.TemporaryDirectory() as tmp:
-        prepare_copy(dir_a, os.path.join(tmp, "A"), rules)
-        prepare_copy(dir_b, os.path.join(tmp, "B"), rules)
+        prepare_copy(dir_a, os.path.join(tmp, "A"), rules, settings)
+        prepare_copy(dir_b, os.path.join(tmp, "B"), rules, settings)
         normalized = changed_files("A", "B", cwd=tmp)
         sections = diff_sections("A", "B", cwd=tmp)
 
