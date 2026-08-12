@@ -1,4 +1,4 @@
-# dirdiff — air-gap delivery image.
+# MaNishtana — air-gap delivery image.
 #
 # Bundles the one dependency the tool cannot degrade without (git) and the two
 # optional normalizers (clang-format, gcc), so the closed network needs no
@@ -10,7 +10,7 @@
 
 FROM python:3.11-slim
 
-LABEL org.opencontainers.image.title="dirdiff" \
+LABEL org.opencontainers.image.title="MaNishtana" \
       org.opencontainers.image.description="Rule-based directory comparison, with LLM analysis of the real changes only" \
       org.opencontainers.image.source="https://github.com/HighOnInformation/NafkaMina"
 
@@ -26,17 +26,17 @@ RUN git config --system --add safe.directory '*'
 
 # The package lives outside the working directory on purpose: a bind mount over
 # /work must not be able to shadow it.
-ENV PYTHONPATH=/opt/dirdiff \
+ENV PYTHONPATH=/opt/manishtana \
     PYTHONDONTWRITEBYTECODE=1
-COPY dirdiff/ /opt/dirdiff/dirdiff/
-COPY tests/ /opt/dirdiff/tests/
-COPY config.json /opt/dirdiff/config.json
+COPY manishtana/ /opt/manishtana/manishtana/
+COPY tests/ /opt/manishtana/tests/
+COPY config.json /opt/manishtana/config.json
 
 # Prove the copy is intact while the network still exists. The suite needs no
 # git, no normalizers and no endpoint, so this is a pure integrity check — and
 # it is the same command the target box re-runs after the transfer.
-RUN python -m unittest discover -s /opt/dirdiff/tests \
- && python -m dirdiff --help > /dev/null
+RUN python -m unittest discover -s /opt/manishtana/tests \
+ && python -m manishtana --help > /dev/null
 
 # No USER is set, deliberately. Nothing here needs a particular uid — git's
 # config is system-wide and nothing under /opt is written at runtime — so the
@@ -45,5 +45,5 @@ RUN python -m unittest discover -s /opt/dirdiff/tests \
 # also make every bind-mounted output directory unwritable.
 WORKDIR /work
 
-ENTRYPOINT ["python", "-m", "dirdiff"]
+ENTRYPOINT ["python", "-m", "manishtana"]
 CMD ["--help"]

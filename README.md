@@ -1,6 +1,7 @@
-# dirdiff — rule-based directory comparison
+# MaNishtana — rule-based directory comparison
 
-Compares two source directories and separates **substantive change** from **noise**:
+*מה נשתנה* — "what has changed?" Compares two source directories and separates
+**substantive change** from **noise**:
 formatting, comments, whitespace, and generated timestamps or build numbers. Only
 what survives the filter reaches a language model.
 
@@ -8,7 +9,7 @@ Standard library only — no pip, no virtualenv, nothing to install. Built to be
 copied onto a closed network and run.
 
 ```bash
-python3 -m dirdiff v1 v2 -c config.json -o report.md -H report.html 2> report.warnings
+python3 -m manishtana v1 v2 -c config.json -o report.md -H report.html 2> report.warnings
 ```
 
 ## Contents
@@ -123,8 +124,8 @@ imports it on the far side.
 
 | Artifact | What it solves | Size |
 |---|---|---|
-| `dirdiff.bundle` | The whole repository, **all history, one file**. Clone offline; bundle back out to return work | ~70 KB |
-| `dirdiff-image.tar.gz` | A container carrying Python, git, clang-format and gcc — no package repository needed | a few hundred MB |
+| `manishtana.bundle` | The whole repository, **all history, one file**. Clone offline; bundle back out to return work | ~70 KB |
+| `manishtana-image.tar.gz` | A container carrying Python, git, clang-format and gcc — no package repository needed | a few hundred MB |
 | `deps/<distro>/` | The same four tools as native packages with an `install.sh` | varies |
 | `SHA256SUMS`, `IMPORT.txt`, `airgap.sh` | Verification, instructions, and the importer itself | small |
 
@@ -171,9 +172,9 @@ already had — which is what `--dry-run` is for.
 
 ### Without any of that
 
-The package is 253 KB of Python. Copying `dirdiff/`, `tests/` and `config.json` by
-hand works, and `dirdiff/` must land whole — the modules import each other, so a
-partial copy fails at import. Confirm with `python3 -m dirdiff --help` and
+The package is 253 KB of Python. Copying `manishtana/`, `tests/` and `config.json` by
+hand works, and `manishtana/` must land whole — the modules import each other, so a
+partial copy fails at import. Confirm with `python3 -m manishtana --help` and
 `python3 -m unittest discover -s tests` before you need it.
 
 ### Running the container
@@ -183,11 +184,11 @@ mkdir -p out
 docker run --rm --user "$(id -u):$(id -g)" \
   -v "$PWD/v1:/work/v1:ro" -v "$PWD/v2:/work/v2:ro" \
   -v "$PWD/config.json:/work/config.json:ro" -v "$PWD/out:/work/out" \
-  dirdiff v1 v2 -c config.json -o out/report.md -H out/report.html \
+  manishtana v1 v2 -c config.json -o out/report.md -H out/report.html \
   2> out/report.warnings
 ```
 
-`WORKDIR` is `/work`; the package lives at `/opt/dirdiff`, outside it, so a mount
+`WORKDIR` is `/work`; the package lives at `/opt/manishtana`, outside it, so a mount
 cannot shadow it. Two things that will bite you if you skip them:
 
 - **Pass `--user "$(id -u):$(id -g)"`**, or the reports land owned by root. The
@@ -207,9 +208,9 @@ A bundle works in both directions. Commit on the closed network, then
 ## Usage
 
 ```bash
-python3 -m dirdiff DIR_A DIR_B -c config.json -o report.md
-python3 -m dirdiff DIR_A DIR_B -c config.json -o report.md --no-llm
-python3 -m dirdiff DIR_A DIR_B -c config.json -o report.md -H report.html -j report.json
+python3 -m manishtana DIR_A DIR_B -c config.json -o report.md
+python3 -m manishtana DIR_A DIR_B -c config.json -o report.md --no-llm
+python3 -m manishtana DIR_A DIR_B -c config.json -o report.md -H report.html -j report.json
 ```
 
 | Flag | Default | Meaning |

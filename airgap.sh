@@ -10,22 +10,22 @@
 #
 # The set holds up to three artifacts, because they solve different problems:
 #
-#   dirdiff.bundle        the whole git repository, all history, one file.
-#                         Clone from it offline; bundle back out to return work.
-#   dirdiff-image.tar.gz  a container carrying python, git, clang-format and
-#                         gcc, so the target needs no package repository.
-#   deps/<distro>/        the same tools as native .deb/.rpm packages, for a
-#                         target that has no docker. Run its install.sh as root.
+#   manishtana.bundle        the whole git repository, all history, one file.
+#                            Clone from it offline; bundle back out to return work.
+#   manishtana-image.tar.gz  a container carrying python, git, clang-format and
+#                            gcc, so the target needs no package repository.
+#   deps/<distro>/           the same tools as native .deb/.rpm packages, for a
+#                            target that has no docker. Run install.sh as root.
 #
 # The bundle alone is enough when the target already has Python 3.8+ and git.
 # Carry the image if the target runs docker, or deps/ if it does not.
 
 set -euo pipefail
 
-IMAGE="${DIRDIFF_IMAGE:-dirdiff}"
-DIST="${DIRDIFF_DIST:-dist}"
-BUNDLE="dirdiff.bundle"
-TARBALL="dirdiff-image.tar.gz"
+IMAGE="${MANISHTANA_IMAGE:-manishtana}"
+DIST="${MANISHTANA_DIST:-dist}"
+BUNDLE="manishtana.bundle"
+TARBALL="manishtana-image.tar.gz"
 SUMS="SHA256SUMS"
 
 say()  { printf '==> %s\n' "$1"; }
@@ -88,8 +88,8 @@ do_pack() {
 
 write_import_notes() {
     cat > "$DIST/IMPORT.txt" <<'EOF'
-dirdiff — importing on the closed network
-=========================================
+MaNishtana — importing on the closed network
+===========================================
 
 1. Verify the transfer before trusting any of it:
 
@@ -110,7 +110,7 @@ dirdiff — importing on the closed network
 
        ./airgap.sh import
 
-   Clones the repository from dirdiff.bundle into ./dirdiff, and loads the
+   Clones the repository from manishtana.bundle into ./manishtana, and loads the
    container image if one was included.
 
 4. Confirm it runs HERE, not merely that it copied:
@@ -122,8 +122,8 @@ Running it
 
 Native (needs Python 3.8+ and git 2.30+):
 
-    cd dirdiff
-    python3 -m dirdiff v1 v2 -c config.json -o report.md -H report.html \
+    cd manishtana
+    python3 -m manishtana v1 v2 -c config.json -o report.md -H report.html \
         2> report.warnings
 
 Container (needs only docker):
@@ -132,7 +132,7 @@ Container (needs only docker):
     docker run --rm --user "$(id -u):$(id -g)" \
       -v "$PWD/v1:/work/v1:ro" -v "$PWD/v2:/work/v2:ro" \
       -v "$PWD/config.json:/work/config.json:ro" -v "$PWD/out:/work/out" \
-      dirdiff v1 v2 -c config.json -o out/report.md -H out/report.html \
+      manishtana v1 v2 -c config.json -o out/report.md -H out/report.html \
       2> out/report.warnings
 
 Read the .warnings file first. Warnings never appear in the report itself, and
@@ -164,14 +164,14 @@ do_import() {
     local dir="."
     [ -f "$BUNDLE" ] || dir="$DIST"
 
-    if [ -e dirdiff ]; then
-        warn "./dirdiff already exists — skipping the clone"
+    if [ -e manishtana ]; then
+        warn "./manishtana already exists — skipping the clone"
     else
         say "cloning the repository from $BUNDLE"
-        git clone "$dir/$BUNDLE" dirdiff
+        git clone "$dir/$BUNDLE" manishtana
         # A bundle leaves 'origin' pointing at a file that will not stay there.
         # Drop it so nobody is misled into thinking they can fetch from it.
-        ( cd dirdiff && git remote remove origin )
+        ( cd manishtana && git remote remove origin )
     fi
 
     if [ -f "$dir/$TARBALL" ]; then
@@ -209,7 +209,7 @@ do_selftest() {
 
     if [ -n "$py" ]; then
         local root="."
-        [ -d dirdiff/tests ] && root="dirdiff"
+        [ -d manishtana/tests ] && root="manishtana"
         if [ -d "$root/tests" ]; then
             say "native suite"
             ( cd "$root" && "$py" -m unittest discover -s tests ) || failed=1
@@ -224,7 +224,7 @@ do_selftest() {
     if have_docker && docker image inspect "$IMAGE" > /dev/null 2>&1; then
         say "packaged suite, inside the image"
         docker run --rm --entrypoint python "$IMAGE" \
-            -m unittest discover -s /opt/dirdiff/tests || failed=1
+            -m unittest discover -s /opt/manishtana/tests || failed=1
         say "bundled tools"
         docker run --rm --entrypoint sh "$IMAGE" -c \
             'git --version && clang-format --version && gcc --version | head -1' || failed=1
@@ -248,8 +248,8 @@ do_selftest() {
 # more minimal than the image may still want a transitive dependency that the
 # image already had. Verify with `install.sh --dry-run` on the target.
 
-APT_PACKAGES="${DIRDIFF_APT_PACKAGES:-git clang-format gcc python3}"
-DNF_PACKAGES="${DIRDIFF_DNF_PACKAGES:-git clang-tools-extra gcc python3}"
+APT_PACKAGES="${MANISHTANA_APT_PACKAGES:-git clang-format gcc python3}"
+DNF_PACKAGES="${MANISHTANA_DNF_PACKAGES:-git clang-tools-extra gcc python3}"
 
 do_deps() {
     local base="${1:-}"
@@ -290,7 +290,7 @@ write_install_script() {
     local out="$1" base="$2"
     cat > "$out/install.sh" <<EOF
 #!/usr/bin/env sh
-# Offline install of dirdiff's dependencies, resolved against $base.
+# Offline install of manishtana's dependencies, resolved against $base.
 # Run as root on the target:  sh install.sh   (or: sh install.sh --dry-run)
 
 set -eu

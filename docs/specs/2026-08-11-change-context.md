@@ -18,7 +18,7 @@ reviewed, approved or tuned without editing source.
 
 ## Part A — deterministic cross-reference (no model)
 
-A new `dirdiff/symbols.py`:
+A new `manishtana/symbols.py`:
 
     cross_reference(sections, dir_b) -> CrossReference
     CrossReference  namedtuple(removed, dangling)
@@ -62,7 +62,7 @@ label the prompt asks for; translating the prompt without moving the label makes
 every badge silently vanish. They are one coupled input.
 
 Everything defaults to today's built-ins, so existing configs keep working. A new
-`dirdiff/settings.py` loads, validates and resolves, so the rest of the package
+`manishtana/settings.py` loads, validates and resolves, so the rest of the package
 still receives plain values and `config.get(...)` does not leak across modules.
 
 Record `prompts_sha256` in the JSON so a report is traceable to the prompt set

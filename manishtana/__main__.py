@@ -1,4 +1,4 @@
-"""Entry point so the package can be run as `python3 -m dirdiff`."""
+"""Entry point so the package can be run as `python3 -m manishtana`."""
 
 import sys
 

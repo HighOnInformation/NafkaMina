@@ -13,7 +13,7 @@ docs/
 
 Dockerfile
 .dockerignore
-export-image.sh
+airgap.sh
 
 __pycache__/
 *.pyc

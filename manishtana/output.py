@@ -308,7 +308,7 @@ def build_html(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=Non
     out.append('<div class="wrap">')
 
     out.append("<header>")
-    out.append('<p class="eyebrow">dirdiff report</p>')
+    out.append('<p class="eyebrow">MaNishtana report</p>')
     out.append("<h1>Directory comparison</h1>")
     out.append('<dl class="meta">')
     out.append("<dt>Directory A</dt><dd>%s</dd>" % escape(dir_a))

@@ -95,8 +95,8 @@ def main(argv=None):
 
 def _parse_args(argv):
     parser = argparse.ArgumentParser(
-        prog="dirdiff",
-        description="dirdiff — rule-based directory comparison, with LLM analysis of "
+        prog="manishtana",
+        description="MaNishtana — rule-based directory comparison, with LLM analysis of "
         "the real changes only.",
     )
     parser.add_argument("dir_a", metavar="DIR_A", help="first directory (the old version)")

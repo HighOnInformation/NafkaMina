@@ -1,4 +1,4 @@
-# dirdiff — UI/UX guide of use
+# MaNishtana — UI/UX guide of use
 
 How to use this tool, how to read what it produces, and how to extend it without
 breaking the one idea it is built around.
@@ -29,11 +29,11 @@ Prove the box before you need it. Each step catches a different failure.
 ```bash
 python3 --version                        # 3.8+
 git --version                            # 2.30+, needs diff --no-index
-python3 -m dirdiff --help                # proves the package copied whole
+python3 -m manishtana --help                # proves the package copied whole
 clang-format --version                   # optional normalizer
 gcc --version                            # optional, powers strip-comments
 python3 -m unittest discover -s tests    # 93 tests, no git or network needed
-python3 -m dirdiff v1 v2 -c config.json -o /tmp/smoke.md --no-llm 2> /tmp/smoke.warn
+python3 -m manishtana v1 v2 -c config.json -o /tmp/smoke.md --no-llm 2> /tmp/smoke.warn
 ```
 
 Read `/tmp/smoke.warn` first. If it names a missing tool, every later report will
@@ -51,7 +51,7 @@ long absolute paths bloat every pane.
 
 ```bash
 cd /srv/drops/acme
-PYTHONPATH=/opt/dirdiff python3 -m dirdiff v1 v2 \
+PYTHONPATH=/opt/manishtana python3 -m manishtana v1 v2 \
     -c acme.json -o v2-review.md -H v2-review.html -j v2-review.json \
     2> v2-review.warnings
 ```
@@ -69,9 +69,9 @@ Two passes. The first is free — no model calls — and exists to tune the rule
 the noise column absorbs the churn.
 
 ```bash
-python3 -m dirdiff v1 v2 -c acme.json -o pass1.md --no-llm 2> pass1.warnings
+python3 -m manishtana v1 v2 -c acme.json -o pass1.md --no-llm 2> pass1.warnings
 # edit acme.json, repeat, until "real changes" is a number a human can read
-python3 -m dirdiff v1 v2 -c acme.json -o review.md -H review.html -j review.json \
+python3 -m manishtana v1 v2 -c acme.json -o review.md -H review.html -j review.json \
     2> review.warnings
 ```
 
@@ -92,7 +92,7 @@ sorted(d['real'],key=lambda f:{'high':0,'medium':1,'low':2}.get(f['risk'],3))))"
 ## 2. The command line as an interface
 
 ```
-usage: dirdiff [-h] [-c CONFIG] [-o OUTPUT] [-H PATH] [-j PATH] [--no-llm]
+usage: manishtana [-h] [-c CONFIG] [-o OUTPUT] [-H PATH] [-j PATH] [--no-llm]
                DIR_A DIR_B
 ```
 

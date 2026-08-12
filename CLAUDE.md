@@ -6,17 +6,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 python -m unittest discover -s tests                    # full suite (139 tests, no git/network needed)
-cd tests && python -m unittest test_dirdiff.ExtractRisk.test_plain_level   # a single test or class
+cd tests && python -m unittest test_manishtana.ExtractRisk.test_plain_level   # a single test or class
 python -m unittest discover -s tests -k test_plain_level                   # or by name pattern
 
-python -m dirdiff DIR_A DIR_B -c config.json -o report.md            # run the tool
-python -m dirdiff DIR_A DIR_B -c config.json -o report.md --no-llm   # skip model analysis
+python -m manishtana DIR_A DIR_B -c config.json -o report.md            # run the tool
+python -m manishtana DIR_A DIR_B -c config.json -o report.md --no-llm   # skip model analysis
 ```
 
-`python -m unittest tests.test_dirdiff...` does **not** work — `tests/` has no `__init__.py`. Run
+`python -m unittest tests.test_manishtana...` does **not** work — `tests/` has no `__init__.py`. Run
 from inside `tests/` (the test file inserts the repo root into `sys.path` itself) or use `-k`.
 
 There is no build step, no linter config, and no package metadata — the tool is copied, not installed.
+
+## Naming
+
+The tool is **MaNishtana** (מה נשתנה, "what has changed?"). The package, the module, the
+command, the docker image and every filename are lowercase `manishtana`. Use the capitalized
+form only in prose and user-facing titles.
+
+Lowercase is not a style preference here: docker repository names must be lowercase, and this
+package has to import identically on case-sensitive Linux and case-insensitive Windows — a
+mixed-case package name is the same class of cross-platform trap as `fnmatch`'s case folding.
 
 ## Hard constraints
 
@@ -83,7 +93,7 @@ unreadable config, `main` returns exit code 2. `chat` callables return `None` in
 
 ## Conventions
 
-- `%`-formatting throughout; no f-strings, no type annotations anywhere in `dirdiff/`. Match it.
+- `%`-formatting throughout; no f-strings, no type annotations anywhere in `manishtana/`. Match it.
 - Module and function docstrings explain *why* a design choice was made (see `_apply_ignore_lines`,
   `_fold`, `_section_path`). Preserve that reasoning when editing; it documents decisions the code
   alone cannot.

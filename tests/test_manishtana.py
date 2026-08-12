@@ -1,4 +1,4 @@
-"""Unit tests for dirdiff — no git, no normalizers, no network.
+"""Unit tests for manishtana — no git, no normalizers, no network.
 
 Run from the repository root:
 
@@ -19,10 +19,10 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dirdiff.compare import Comparison, _noise
-from dirdiff.gitdiff import _parse_name_status, _relativize, _split_sections, _unquote
-from dirdiff.llm import _manifest, analyze_changes
-from dirdiff.output import (
+from manishtana.compare import Comparison, _noise
+from manishtana.gitdiff import _parse_name_status, _relativize, _split_sections, _unquote
+from manishtana.llm import _manifest, analyze_changes
+from manishtana.output import (
     _extract_risk,
     _mark_pair,
     _side_by_side,
@@ -30,10 +30,10 @@ from dirdiff.output import (
     build_json,
     build_report,
 )
-from dirdiff.settings import load as load_settings
-from dirdiff.symbols import CrossReference as CrossRef
-from dirdiff.symbols import _definitions, cross_reference
-from dirdiff.rules import (
+from manishtana.settings import load as load_settings
+from manishtana.symbols import CrossReference as CrossRef
+from manishtana.symbols import _definitions, cross_reference
+from manishtana.rules import (
     IGNORED_TOKEN,
     _apply_ignore_lines,
     _command_for,
