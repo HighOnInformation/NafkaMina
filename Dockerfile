@@ -12,7 +12,7 @@ FROM python:3.11-slim
 
 LABEL org.opencontainers.image.title="MaNishtana" \
       org.opencontainers.image.description="Rule-based directory comparison, with LLM analysis of the real changes only" \
-      org.opencontainers.image.source="https://github.com/HighOnInformation/manishtana"
+      org.opencontainers.image.source="https://github.com/HighOnInformation/MaNishtana"
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git clang-format gcc \
