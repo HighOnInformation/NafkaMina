@@ -96,7 +96,7 @@ never compiles. If you use it instead of `gcc`, override the normalizer in
 Carries `gcc`, `clang-format`, `git` and Python, so nothing is installed:
 
 ```bash
-docker run --rm -v "$PWD:/work" uzanni/manishtana:1.0.0 \
+docker run --rm -v "$PWD:/work" uzanni/manishtana:1.0.1 \
     v1 v2 -c config.json -o report.md --no-llm
 ```
 
@@ -119,10 +119,10 @@ A single host running batches. Docker or Podman; no Python needed on the host.
 Connected:
 
 ```bash
-docker pull uzanni/manishtana@sha256:e652c1c644380b1fc7b6ebb8a092488ee271b6ea8ede345402dc38d9d4049d10
+docker pull uzanni/manishtana@sha256:bcef86e6ff38d69d9312d35b27292ee89c8907dbc92dbb9ee85db98c3242864b
 ```
 
-Pin the digest rather than the `1.0.0` tag. A tag can be repointed; a digest
+Pin the digest rather than the `1.0.1` tag. A tag can be repointed; a digest
 cannot, so the box always runs the image you tested.
 
 Air-gapped — carry one file and load it:
@@ -146,7 +146,7 @@ docker run --rm --user "$(id -u):$(id -g)" \
   -v "$PWD/v2:/work/v2:ro" \
   -v "$PWD/config.json:/work/config.json:ro" \
   -v "$PWD/out:/work/out" \
-  uzanni/manishtana:1.0.0 \
+  uzanni/manishtana:1.0.1 \
   v1 v2 -c config.json -o out/report.md -H out/report.html -j out/report.json \
   2> out/report.warnings
 ```
@@ -185,7 +185,7 @@ After=docker.service
 Type=oneshot
 WorkingDirectory=/srv/manishtana/%i
 ExecStart=/usr/bin/docker run --rm --user 1000:1000 \
-    -v /srv/manishtana/%i:/work uzanni/manishtana:1.0.0 \
+    -v /srv/manishtana/%i:/work uzanni/manishtana:1.0.1 \
     v1 v2 -c config.json -o out/report.md -j out/report.json
 ```
 
@@ -194,9 +194,9 @@ ExecStart=/usr/bin/docker run --rm --user 1000:1000 \
 ### Verify stage 2
 
 ```bash
-docker run --rm --entrypoint sh uzanni/manishtana:1.0.0 \
+docker run --rm --entrypoint sh uzanni/manishtana:1.0.1 \
     -c 'git --version && clang-format --version && gcc --version | head -1'
-docker run --rm --entrypoint python uzanni/manishtana:1.0.0 \
+docker run --rm --entrypoint python uzanni/manishtana:1.0.1 \
     -m unittest discover -s /opt/manishtana/tests
 ```
 
@@ -230,14 +230,14 @@ Disconnected clusters:
 
 ```bash
 skopeo copy docker-archive:manishtana-image.tar.gz \
-    docker://<mirror-registry>/manishtana:1.0.0
+    docker://<mirror-registry>/manishtana:1.0.1
 ```
 
 Connected:
 
 ```bash
-skopeo copy docker://uzanni/manishtana:1.0.0 \
-    docker://<internal-registry>/manishtana:1.0.0
+skopeo copy docker://uzanni/manishtana:1.0.1 \
+    docker://<internal-registry>/manishtana:1.0.1
 ```
 
 ### Configuration and secrets
@@ -265,7 +265,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: manishtana
-          image: <registry>/manishtana:1.0.0
+          image: <registry>/manishtana:1.0.1
           args:
             - v1
             - v2
@@ -315,7 +315,7 @@ namespace means every result from that pod is degraded.
 
 ```bash
 oc run manishtana-check --rm -it --restart=Never \
-   --image=<registry>/manishtana:1.0.0 --command -- \
+   --image=<registry>/manishtana:1.0.1 --command -- \
    sh -c 'id && gcc --version | head -1 && touch /work/probe && echo WRITABLE'
 ```
 
