@@ -234,15 +234,24 @@ class LineEndings(unittest.TestCase):
 class InsideRoot(unittest.TestCase):
     """git reports paths for trees this tool did not create."""
 
+    def setUp(self):
+        # A real directory, not the working directory: the image runs its tests
+        # from /, and nothing can escape the filesystem root, so cwd would make
+        # these two assertions vacuously false.
+        self.root = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
     def test_a_normal_relative_path_resolves(self):
-        self.assertIsNotNone(_inside(os.getcwd(), "sub/file.c"))
+        self.assertIsNotNone(_inside(self.root, "sub/file.c"))
 
     def test_an_absolute_path_is_refused(self):
         escape = "C:/Windows/win.ini" if os.name == "nt" else "/etc/passwd"
-        self.assertIsNone(_inside(os.getcwd(), escape))
+        self.assertIsNone(_inside(self.root, escape))
 
     def test_a_dotdot_escape_is_refused(self):
-        self.assertIsNone(_inside(os.getcwd(), "../../../../etc/passwd"))
+        self.assertIsNone(_inside(self.root, "../../../../etc/passwd"))
 
 
 class RemoveTree(unittest.TestCase):
